@@ -1,0 +1,16 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+
+# PyMOL fetched structures (re-fetched on demand)
+*.cif
+*.pdb
+
+# Generated render output (demo image kept separately)
+scene.pml
