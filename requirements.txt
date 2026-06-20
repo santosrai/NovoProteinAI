@@ -1,0 +1,5 @@
+requests>=2.31
+uagents>=0.25
+# PyMOL is used by visualize.py for rendering. It is not reliably pip-installable;
+# install it via conda (`conda install -c conda-forge pymol-open-source`) or your
+# platform package manager.
