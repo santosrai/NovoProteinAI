@@ -62,4 +62,59 @@ exists in the PDB before returning.
    `explanation`, don't crash).
 
 ### Out of scope (do not build these here)
-- The Claude conversation layer, the PyMOL renderer (already done), any frontend.
+- The orchestrator/conversation layer (that's Task 2), the PyMOL renderer
+  (already done), any frontend.
+
+---
+
+## Task 2 — Orchestrator agent (Fetch.ai, ASI:One-fronted)
+
+**Goal:** Build a second Fetch.ai uAgent that is the conversational "front door"
+of the app. The user talks to **ASI:One**, which discovers and routes to this
+orchestrator agent via the chat protocol. The orchestrator coordinates the other
+pieces — it does NOT do research or rendering itself, it calls them.
+
+**Depends on Task 1** (the research agent). Reuse the same message models /
+output contract so the two agents speak the same language.
+
+**Repo:** `github.com/santosrai/NovoProteinAI`. Add as `orchestrator_agent.py` at
+the repo root. Do NOT modify `visualize.py` or `research_agent.py` beyond importing
+from them.
+
+### Flow
+```
+User  ⇄  ASI:One  ⇄  orchestrator_agent  ──▶ research_agent (Task 1)  → {pdb_id, chain, epitope_residues, binder_pdb_ids, citations}
+                                          └─▶ visualize.render_image(...) → PNG
+```
+On receiving a user goal via the chat protocol, the orchestrator must:
+1. Use **ASI:One** to interpret the user's intent and explain key terms
+   (antibody, epitope, binder, etc.) in beginner-friendly language.
+2. Message the **research agent** (`novoprotein-research`) with the goal and
+   await its structured result.
+3. Call `render_image(pdb_id, epitope_residues, chain, binder_pdb_id)` from
+   `visualize.py` to produce the PNG.
+4. Reply via the chat protocol with: the plain-English explanation, a target
+   summary, the paper citations, and a reference/path to the rendered image.
+
+### Fetch.ai requirements (for the sponsor track)
+- Built with `uagents`, uses the **chat protocol**, ASI:One-compatible.
+- Registered on **Agentverse** via mailbox (so ASI:One can route to it).
+- Agent name: `novoprotein-orchestrator`. Fixed `seed` from env `ORCH_AGENT_SEED`
+  (different seed from the research agent).
+- Research agent address via env `RESEARCH_AGENT_ADDRESS`; ASI:One key via
+  `ASI_ONE_API_KEY`.
+- Define shared request/response `Model`s so the two agents communicate cleanly.
+
+### Acceptance criteria
+1. Sending "build a vaccine for COVID" through ASI:One (or the chat protocol)
+   yields: a plain-English explanation, target info, citations, and a rendered
+   image — end to end across both agents.
+2. The orchestrator actually messages the research agent and consumes its
+   structured response (no duplicated research logic).
+3. Both agents are registered on Agentverse and ASI:One-discoverable.
+4. `README` documents how to run BOTH agents together and all env vars.
+5. Graceful handling when the research agent is unavailable or returns no match.
+
+### Out of scope (do not build these here)
+- The research logic (Task 1), the PyMOL renderer (done), the Devin code-gen
+  client `devin_client.py` (done), any frontend.
