@@ -1,6 +1,6 @@
-# PyMOL MCP Bridge
+# NovoProteinAI
 
-A lightweight Model Context Protocol (MCP) bridge that exposes PyMOL as typed tools to LLM agents like Claude Desktop, Cline, and Devin.
+A tool that uses PyMOL as typed tools to LLM agents like Claude Desktop, Cline, and Devin using MCP and pymol plugin
 
 ## Architecture
 
