@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "pymol": {
+      "command": "python",
+      "args": ["-m", "pymol_mcp.server"],
+      "env": {
+        "PYMOL_HOST": "localhost",
+        "PYMOL_PORT": "9877",
+        "PYMOL_TIMEOUT": "30.0",
+        "PYMOL_RECONNECT_ATTEMPTS": "3",
+        "PYMOL_RECONNECT_DELAY": "1.0",
+        "PYMOL_LOG_LEVEL": "INFO"
+      }
+    }
+  }
+}

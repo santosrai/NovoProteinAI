@@ -1,0 +1,19 @@
+# PyMOL MCP Bridge Configuration
+
+# PyMOL plugin host
+host: localhost
+
+# PyMOL plugin port
+port: 9877
+
+# Request timeout in seconds
+timeout: 30.0
+
+# Number of reconnection attempts
+reconnect_attempts: 3
+
+# Initial reconnection delay in seconds (exponential backoff)
+reconnect_delay: 1.0
+
+# Logging level (DEBUG, INFO, WARNING, ERROR)
+log_level: INFO
