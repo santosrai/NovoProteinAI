@@ -53,3 +53,10 @@ Thumbs.db
 # Temporary files
 *.tmp
 *.bak
+
+# PyMOL fetched structures (re-fetched on demand)
+*.cif
+*.pdb
+
+# Generated render output (demo image kept separately)
+scene.pml
