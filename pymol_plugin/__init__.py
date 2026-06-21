@@ -210,12 +210,21 @@ class PyMOLCommandHandler:
                     }
 
                 obj_name = resolved["object_name"]
+                # Idempotent load: PyMOL refuses to load/fetch onto an object
+                # that already exists ("loading mmCIF into existing object not
+                # supported"). Delete any existing object of this name first so
+                # re-loading simply replaces it.
+                replaced = obj_name in cmd.get_object_list()
+                if replaced:
+                    cmd.delete(obj_name)
                 if resolved["mode"] == "load":
                     cmd.load(resolved["path"], obj_name)
                     message = f"Loaded structure from file: {obj_name}"
                 else:
                     cmd.fetch(resolved["source"], obj_name)
                     message = f"Fetched structure: {obj_name}"
+                if replaced:
+                    message += " (replaced existing object)"
 
                 return {
                     "result": {

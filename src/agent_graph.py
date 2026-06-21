@@ -182,7 +182,12 @@ def _plugin_result_text(response: dict, ok_default: str = "OK") -> str:
 
 
 def _relay_pymol_tools():
-    """PyMOL tools that route over the relay to the user's local PyMOL."""
+    """PyMOL tools that route over the relay to the user's local PyMOL.
+
+    Tool errors are returned as readable strings (never raised) so the agent
+    loop can feed them back to the model, which can then adjust and retry within
+    the same turn instead of crashing the whole turn.
+    """
 
     @tool
     def pymol_ping() -> str:
@@ -190,40 +195,52 @@ def _relay_pymol_tools():
         resp = _run_plugin("ping", {})
         if "error" in resp:
             err = resp["error"]
-            raise Exception(f"PyMOL error ({err.get('code')}): {err.get('message')}")
+            return f"PyMOL error ({err.get('code')}): {err.get('message')}"
         result = resp.get("result", {})
         return f"✓ PyMOL connected (version {result.get('version', 'unknown')})"
 
     @tool
     def pymol_load_structure(source: str, object_name: str = "") -> str:
         """Load a PDB ID or structure file into PyMOL."""
-        resp = _run_plugin(
-            "load_structure", {"source": source, "object_name": object_name or ""}
-        )
-        return f"✓ {_plugin_result_text(resp, 'Structure loaded')}"
+        try:
+            resp = _run_plugin(
+                "load_structure", {"source": source, "object_name": object_name or ""}
+            )
+            return f"✓ {_plugin_result_text(resp, 'Structure loaded')}"
+        except Exception as exc:
+            return f"PyMOL error: {exc}"
 
     @tool
     def pymol_select_atoms(selection_name: str, selection_expr: str) -> str:
         """Create a named PyMOL selection (e.g. 'chain A and resi 1-10')."""
-        resp = _run_plugin(
-            "select_atoms",
-            {"selection_name": selection_name, "selection_expr": selection_expr},
-        )
-        return f"✓ {_plugin_result_text(resp, 'Selection created')}"
+        try:
+            resp = _run_plugin(
+                "select_atoms",
+                {"selection_name": selection_name, "selection_expr": selection_expr},
+            )
+            return f"✓ {_plugin_result_text(resp, 'Selection created')}"
+        except Exception as exc:
+            return f"PyMOL error: {exc}"
 
     @tool
     def pymol_color_selection(color: str, selection: str = "all") -> str:
         """Color a PyMOL selection (e.g. color 'red' on selection 'chain A')."""
-        resp = _run_plugin("color_selection", {"color": color, "selection": selection})
-        return f"✓ {_plugin_result_text(resp, 'Colored')}"
+        try:
+            resp = _run_plugin("color_selection", {"color": color, "selection": selection})
+            return f"✓ {_plugin_result_text(resp, 'Colored')}"
+        except Exception as exc:
+            return f"PyMOL error: {exc}"
 
     @tool
     def pymol_rotate(axis: str = "y", angle: float = 90, selection: str = "") -> str:
         """Rotate the camera or a selection about an axis (x/y/z)."""
-        resp = _run_plugin(
-            "rotate", {"axis": axis, "angle": angle, "selection": selection}
-        )
-        return f"✓ {_plugin_result_text(resp, 'Rotated')}"
+        try:
+            resp = _run_plugin(
+                "rotate", {"axis": axis, "angle": angle, "selection": selection}
+            )
+            return f"✓ {_plugin_result_text(resp, 'Rotated')}"
+        except Exception as exc:
+            return f"PyMOL error: {exc}"
 
     @tool
     def pymol_render_image(
@@ -233,16 +250,19 @@ def _relay_pymol_tools():
         ray_trace: bool = False,
     ) -> str:
         """Render the current PyMOL view to a PNG (saved on the user's machine)."""
-        resp = _run_plugin(
-            "render_image",
-            {
-                "output_path": output_path,
-                "width": width,
-                "height": height,
-                "ray_trace": ray_trace,
-            },
-        )
-        return f"✓ {_plugin_result_text(resp, 'Image rendered')}"
+        try:
+            resp = _run_plugin(
+                "render_image",
+                {
+                    "output_path": output_path,
+                    "width": width,
+                    "height": height,
+                    "ray_trace": ray_trace,
+                },
+            )
+            return f"✓ {_plugin_result_text(resp, 'Image rendered')}"
+        except Exception as exc:
+            return f"PyMOL error: {exc}"
 
     return [
         pymol_ping,
@@ -256,40 +276,63 @@ def _relay_pymol_tools():
 
 # --- PyMOL tools: direct-wrapper fallback -----------------------------------
 def _direct_pymol_tools():
-    """Wrap pymol_mcp.tools as LangChain tools (used if MCP loading fails)."""
+    """Wrap pymol_mcp.tools as LangChain tools (direct localhost TCP).
+
+    Tool errors are returned as readable strings (never raised) so the agent
+    loop can feed them back to the model, which can then adjust and retry within
+    the same turn instead of crashing the whole turn.
+    """
     from pymol_mcp import tools as pt
 
     @tool
     def pymol_ping() -> str:
         """Check the PyMOL connection and return its version."""
-        return pt.ping_pymol()
+        try:
+            return pt.ping_pymol()
+        except Exception as exc:
+            return f"PyMOL error: {exc}"
 
     @tool
     def pymol_load_structure(source: str, object_name: str = "") -> str:
         """Load a PDB ID or structure file into PyMOL."""
-        return pt.load_structure(source, object_name or None)
+        try:
+            return pt.load_structure(source, object_name or None)
+        except Exception as exc:
+            return f"PyMOL error: {exc}"
 
     @tool
     def pymol_select_atoms(selection_name: str, selection_expr: str) -> str:
         """Create a named PyMOL selection (e.g. 'chain A and resi 1-10')."""
-        return pt.select_atoms(selection_name, selection_expr)
+        try:
+            return pt.select_atoms(selection_name, selection_expr)
+        except Exception as exc:
+            return f"PyMOL error: {exc}"
 
     @tool
     def pymol_color_selection(color: str, selection: str = "all") -> str:
         """Color a PyMOL selection (e.g. color 'red' on selection 'chain A')."""
-        return pt.color_selection(color, selection)
+        try:
+            return pt.color_selection(color, selection)
+        except Exception as exc:
+            return f"PyMOL error: {exc}"
 
     @tool
     def pymol_rotate(axis: str = "y", angle: float = 90, selection: str = "") -> str:
         """Rotate the camera or a selection about an axis (x/y/z)."""
-        return pt.rotate(axis, angle, selection)
+        try:
+            return pt.rotate(axis, angle, selection)
+        except Exception as exc:
+            return f"PyMOL error: {exc}"
 
     @tool
     def pymol_render_image(
         output_path: str, width: int = 1200, height: int = 900, ray_trace: bool = False
     ) -> str:
         """Render the current PyMOL view to a PNG at output_path."""
-        return pt.render_image(output_path, width, height, ray_trace)
+        try:
+            return pt.render_image(output_path, width, height, ray_trace)
+        except Exception as exc:
+            return f"PyMOL error: {exc}"
 
     return [
         pymol_ping,
