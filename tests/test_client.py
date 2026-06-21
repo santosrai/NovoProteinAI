@@ -59,13 +59,15 @@ class TestPyMOLClient:
     
     def test_disconnect(self, client):
         """Test disconnection."""
-        client.socket = Mock()
+        mock_socket = Mock()
+        client.socket = mock_socket
         client.connected = True
         
         client.disconnect()
         
         assert client.connected is False
-        client.socket.close.assert_called_once()
+        assert client.socket is None
+        mock_socket.close.assert_called_once()
     
     @patch('socket.socket')
     def test_call_not_connected(self, mock_socket_class, client):
