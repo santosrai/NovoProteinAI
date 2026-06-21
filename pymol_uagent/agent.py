@@ -238,7 +238,7 @@ def _parse_with_regex(text: str) -> tuple[str, dict]:
             "width": 800, "height": 600, "ray_trace": False,
         }
 
-    if re.search(r'\b(ping|status|connect|running|alive|check)\b', t):
+    if re.search(r'\b(ping|status|connect|running|alive|check)', t):
         return "ping_pymol", {}
 
     return "", {}
