@@ -9,7 +9,10 @@ import re
 
 import numpy as np
 
-from embeddings import get_embedder
+try:  # package mode
+    from .embeddings import get_embedder
+except ImportError:  # run directly as a script
+    from embeddings import get_embedder
 
 # Split on .?! + whitespace, but ONLY when the next token starts a new sentence
 # (a capital letter or an opening paren). This avoids the common scientific-text

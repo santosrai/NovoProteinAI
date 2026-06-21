@@ -15,9 +15,14 @@ import argparse
 import os
 import re
 
-from embeddings import embed_documents
-from chunking import semantic_chunks
-from schema import KEY_PREFIX, create_index
+try:  # package mode
+    from .embeddings import embed_documents
+    from .chunking import semantic_chunks
+    from .schema import KEY_PREFIX, create_index
+except ImportError:  # run directly as a script
+    from embeddings import embed_documents
+    from chunking import semantic_chunks
+    from schema import KEY_PREFIX, create_index
 
 # Canonical section name -> regex of headings that map to it. Order matters:
 # the first match wins. Covers the common layout of research papers.
