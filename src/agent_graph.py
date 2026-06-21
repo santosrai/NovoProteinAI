@@ -11,6 +11,8 @@ handler. If Anthropic / LangGraph aren't available, the agent falls back to the
 deterministic router in research_agent.py.
 """
 
+import asyncio
+import contextvars
 import os
 import sys
 
@@ -20,6 +22,14 @@ try:  # works when imported as part of the `src` package (e.g. tests)
     from . import research_agent as ra
 except ImportError:  # works when research_agent is run as a script (src on path)
     import research_agent as ra
+
+try:  # relay is used when the agent is deployed publicly (Railway)
+    from . import relay
+except ImportError:
+    try:
+        import relay  # type: ignore
+    except ImportError:
+        relay = None  # local-only mode without the relay package
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
@@ -73,6 +83,130 @@ def run_research(goal: str) -> dict:
 
 
 RESEARCH_TOOLS = [search_pdb, pdb_exists, search_pubmed, run_research]
+
+
+# --- PyMOL tools: relay transport (deployed / public) -----------------------
+# The chat handler sets this per request so tool calls route to the right
+# user's PyMOL (the one paired to this chat session's token).
+current_token: "contextvars.ContextVar[str | None]" = contextvars.ContextVar(
+    "current_token", default=None
+)
+
+
+def _run_plugin(method: str, params: dict) -> dict:
+    """Send a JSON-RPC command to the paired user's PyMOL via the relay.
+
+    Bridges the synchronous LangGraph tool call to the relay's async loop using
+    run_coroutine_threadsafe. Returns the plugin's JSON-RPC response dict (or a
+    JSON-RPC-style error dict). Never raises.
+    """
+    if relay is None:
+        return {"error": {"code": -32601, "message": "Relay not available in this build."}}
+
+    token = current_token.get()
+    if not token:
+        return {
+            "error": {
+                "code": -32300,
+                "message": "This chat session is not paired. Send 'pair <token>' first.",
+            }
+        }
+
+    loop = relay.get_loop()
+    if loop is None:
+        return {"error": {"code": -32300, "message": "Relay is not running yet."}}
+
+    try:
+        fut = asyncio.run_coroutine_threadsafe(
+            relay.call_plugin(token, method, params), loop
+        )
+        return fut.result(timeout=70)
+    except Exception as exc:  # noqa: BLE001 - surface as a readable tool result
+        return {"error": {"code": -32603, "message": f"Relay call failed: {exc}"}}
+
+
+def _plugin_result_text(response: dict, ok_default: str = "OK") -> str:
+    """Normalize a plugin JSON-RPC response into a readable tool string."""
+    if "error" in response:
+        err = response["error"]
+        raise Exception(f"PyMOL error ({err.get('code')}): {err.get('message')}")
+    result = response.get("result", {})
+    if isinstance(result, dict):
+        return result.get("message") or ok_default
+    return str(result)
+
+
+def _relay_pymol_tools():
+    """PyMOL tools that route over the relay to the user's local PyMOL."""
+
+    @tool
+    def pymol_ping() -> str:
+        """Check the PyMOL connection and return its version."""
+        resp = _run_plugin("ping", {})
+        if "error" in resp:
+            err = resp["error"]
+            raise Exception(f"PyMOL error ({err.get('code')}): {err.get('message')}")
+        result = resp.get("result", {})
+        return f"✓ PyMOL connected (version {result.get('version', 'unknown')})"
+
+    @tool
+    def pymol_load_structure(source: str, object_name: str = "") -> str:
+        """Load a PDB ID or structure file into PyMOL."""
+        resp = _run_plugin(
+            "load_structure", {"source": source, "object_name": object_name or ""}
+        )
+        return f"✓ {_plugin_result_text(resp, 'Structure loaded')}"
+
+    @tool
+    def pymol_select_atoms(selection_name: str, selection_expr: str) -> str:
+        """Create a named PyMOL selection (e.g. 'chain A and resi 1-10')."""
+        resp = _run_plugin(
+            "select_atoms",
+            {"selection_name": selection_name, "selection_expr": selection_expr},
+        )
+        return f"✓ {_plugin_result_text(resp, 'Selection created')}"
+
+    @tool
+    def pymol_color_selection(color: str, selection: str = "all") -> str:
+        """Color a PyMOL selection (e.g. color 'red' on selection 'chain A')."""
+        resp = _run_plugin("color_selection", {"color": color, "selection": selection})
+        return f"✓ {_plugin_result_text(resp, 'Colored')}"
+
+    @tool
+    def pymol_rotate(axis: str = "y", angle: float = 90, selection: str = "") -> str:
+        """Rotate the camera or a selection about an axis (x/y/z)."""
+        resp = _run_plugin(
+            "rotate", {"axis": axis, "angle": angle, "selection": selection}
+        )
+        return f"✓ {_plugin_result_text(resp, 'Rotated')}"
+
+    @tool
+    def pymol_render_image(
+        output_path: str = "target.png",
+        width: int = 1200,
+        height: int = 900,
+        ray_trace: bool = False,
+    ) -> str:
+        """Render the current PyMOL view to a PNG (saved on the user's machine)."""
+        resp = _run_plugin(
+            "render_image",
+            {
+                "output_path": output_path,
+                "width": width,
+                "height": height,
+                "ray_trace": ray_trace,
+            },
+        )
+        return f"✓ {_plugin_result_text(resp, 'Image rendered')}"
+
+    return [
+        pymol_ping,
+        pymol_load_structure,
+        pymol_select_atoms,
+        pymol_color_selection,
+        pymol_rotate,
+        pymol_render_image,
+    ]
 
 
 # --- PyMOL tools: direct-wrapper fallback -----------------------------------
@@ -141,13 +275,33 @@ async def _mcp_pymol_tools():
 
 
 async def _load_pymol_tools():
-    """Prefer true MCP adapters; fall back to direct wrappers on any failure."""
-    try:
-        tools = await _mcp_pymol_tools()
-        if tools:
-            return tools, "mcp"
-    except Exception as exc:  # noqa: BLE001 - we want a robust fallback
-        print(f"[agent_graph] MCP tool loading failed ({exc}); using direct wrappers.")
+    """Select the PyMOL tool transport.
+
+    Controlled by PYMOL_TRANSPORT:
+      - "relay" (default): route over the relay to each user's local PyMOL.
+        This is the deployed/public mode (agent on Railway, PyMOL on laptops).
+      - "mcp"  : load tools from the local pymol_mcp MCP server (stdio).
+      - "local"/"direct": direct wrappers around pymol_mcp.tools (localhost TCP).
+
+    MCP/direct are for single-machine local development only.
+    """
+    transport = os.environ.get("PYMOL_TRANSPORT", "relay").lower()
+
+    if transport == "relay":
+        if relay is None:
+            print("[agent_graph] relay unavailable; falling back to direct wrappers.")
+            return _direct_pymol_tools(), "direct"
+        return _relay_pymol_tools(), "relay"
+
+    if transport == "mcp":
+        try:
+            tools = await _mcp_pymol_tools()
+            if tools:
+                return tools, "mcp"
+        except Exception as exc:  # noqa: BLE001 - we want a robust fallback
+            print(f"[agent_graph] MCP tool loading failed ({exc}); using direct wrappers.")
+        return _direct_pymol_tools(), "direct"
+
     return _direct_pymol_tools(), "direct"
 
 

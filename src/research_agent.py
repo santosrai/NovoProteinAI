@@ -373,15 +373,43 @@ def build_agent():
 
         reply_text = None
 
-        # 1. Agentic brain (Claude + LangGraph + MCP tools), if enabled.
         try:
-            try:
-                from . import agent_graph
-            except ImportError:
-                import agent_graph
+            from . import agent_graph, relay
+        except ImportError:
+            import agent_graph  # type: ignore
+            import relay  # type: ignore
 
+        # 0. Pairing: link this chat session to a user's local PyMOL token.
+        lowered = text.lower()
+        if lowered.startswith("pair "):
+            token = text.split(None, 1)[1].strip()
+            relay.set_pairing(sender, token)
+            status = "connected" if relay.is_plugin_connected(token) else "waiting for plugin"
+            await ctx.send(
+                sender,
+                ChatMessage(
+                    timestamp=datetime.now(timezone.utc),
+                    msg_id=uuid4(),
+                    content=[TextContent(
+                        type="text",
+                        text=(
+                            f"Paired with PyMOL session '{token}' ({status}). "
+                            "Open PyMOL, enter this token in the plugin, and click "
+                            "Connect. Then ask me to load/color/render proteins."
+                        ),
+                    )],
+                ),
+            )
+            return
+
+        # Make PyMOL tool calls route to this session's paired PyMOL.
+        token = relay.get_token(sender)
+        agent_graph.current_token.set(token)
+
+        # 1. Agentic brain (Claude + LangGraph + relay PyMOL tools), if enabled.
+        try:
             if agent_graph.is_agentic_enabled():
-                ctx.logger.info(f"Agentic goal: {text}")
+                ctx.logger.info(f"Agentic goal (token={token}): {text}")
                 reply_text = await agent_graph.run_agent(text)
         except Exception as exc:  # fall back to the deterministic path
             ctx.logger.warning(f"Agentic path failed, falling back: {exc}")

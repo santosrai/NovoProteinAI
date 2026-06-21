@@ -23,6 +23,13 @@ except ImportError:
     QtCore = None
     QtGui = None
 
+try:
+    import websocket  # from the `websocket-client` package
+    WEBSOCKET_AVAILABLE = True
+except ImportError:
+    WEBSOCKET_AVAILABLE = False
+    websocket = None
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -396,6 +403,114 @@ class PyMOLTCPServer:
         return "Stopped"
 
 
+class PyMOLRelayClient:
+    """Outbound WebSocket client to a public NovoProteinAI relay.
+
+    Used when the agent is deployed publicly (e.g. Railway). PyMOL runs locally
+    and dials *out* to wss://<app>/plugin?token=<token>, then waits for JSON-RPC
+    commands and replies using the same PyMOLCommandHandler as the TCP server.
+    Outbound connections work from behind NAT, so no port-forwarding is needed.
+    """
+
+    def __init__(self, url: str, token: str):
+        self.base_url = url.rstrip("/")
+        self.token = token
+        self.ws_app: Optional["websocket.WebSocketApp"] = None
+        self.thread: Optional[threading.Thread] = None
+        self.connected = False
+        self._should_run = False
+
+    @property
+    def full_url(self) -> str:
+        return f"{self.base_url}?token={self.token}"
+
+    def _on_open(self, ws):
+        self.connected = True
+        _log(f"Relay connected: {self.base_url} (token={self.token})")
+
+    def _on_close(self, ws, status_code, msg):
+        self.connected = False
+        _log(f"Relay disconnected (code={status_code})")
+
+    def _on_error(self, ws, error):
+        self.connected = False
+        _log(f"Relay error: {error}")
+
+    def _on_message(self, ws, raw):
+        """Execute an incoming JSON-RPC command and send the reply back."""
+        try:
+            msg = json.loads(raw)
+        except json.JSONDecodeError:
+            _log("Relay: dropped non-JSON frame")
+            return
+
+        method = msg.get("method")
+        params = msg.get("params", {})
+        request_id = msg.get("id")
+
+        result = PyMOLCommandHandler.execute(method, params)
+
+        if "error" in result:
+            _log(f"\u2717 {method} \u2192 error: {result['error'].get('message')}")
+        else:
+            _log(f"\u2713 {method} \u2192 ok")
+
+        response = {"jsonrpc": "2.0", "id": request_id}
+        response.update(result)
+        try:
+            ws.send(json.dumps(response))
+        except Exception as exc:
+            _log(f"Relay: failed to send reply: {exc}")
+
+    def _run_forever(self):
+        """Reconnecting run loop (websocket-client handles the socket)."""
+        while self._should_run:
+            self.ws_app = websocket.WebSocketApp(
+                self.full_url,
+                on_open=self._on_open,
+                on_message=self._on_message,
+                on_close=self._on_close,
+                on_error=self._on_error,
+            )
+            self.ws_app.run_forever(ping_interval=30, ping_timeout=10)
+            if self._should_run:
+                _log("Relay: reconnecting in 3s...")
+                threading.Event().wait(3)
+
+    def start(self):
+        """Open the outbound WebSocket connection (non-blocking)."""
+        if not WEBSOCKET_AVAILABLE:
+            raise RuntimeError(
+                "websocket-client is not installed in PyMOL's Python. "
+                "Install it with: pip install websocket-client"
+            )
+        if self._should_run:
+            _log("Relay client already running")
+            return
+        self._should_run = True
+        self.thread = threading.Thread(target=self._run_forever, daemon=True)
+        self.thread.start()
+        _log(f"Relay client starting -> {self.base_url}")
+
+    def stop(self):
+        """Close the WebSocket connection."""
+        self._should_run = False
+        if self.ws_app:
+            try:
+                self.ws_app.close()
+            except Exception:
+                pass
+        self.connected = False
+        _log("Relay client stopped")
+
+    def get_status(self) -> str:
+        if self.connected:
+            return f"Connected to {self.base_url} (token={self.token})"
+        if self._should_run:
+            return f"Connecting to {self.base_url}..."
+        return "Disconnected"
+
+
 class PyMOLMCPDialog(QtWidgets.QDialog if QT_AVAILABLE else object):
     """Control panel dialog for the PyMOL MCP Bridge."""
 
@@ -456,6 +571,46 @@ class PyMOLMCPDialog(QtWidgets.QDialog if QT_AVAILABLE else object):
         button_layout.addWidget(self.stop_btn)
         layout.addLayout(button_layout)
 
+        # --- Cloud relay (connect to a public NovoProteinAI agent) ---
+        relay_group = QtWidgets.QGroupBox("Cloud Relay (public agent)")
+        relay_layout = QtWidgets.QVBoxLayout()
+
+        self.relay_status_label = QtWidgets.QLabel("Relay: Disconnected")
+        self.relay_status_label.setStyleSheet("font-weight: bold;")
+        relay_layout.addWidget(self.relay_status_label)
+
+        url_row = QtWidgets.QHBoxLayout()
+        url_row.addWidget(QtWidgets.QLabel("Relay URL:"))
+        self.relay_url_edit = QtWidgets.QLineEdit()
+        self.relay_url_edit.setPlaceholderText("wss://yourapp.up.railway.app/plugin")
+        url_row.addWidget(self.relay_url_edit)
+        relay_layout.addLayout(url_row)
+
+        token_row = QtWidgets.QHBoxLayout()
+        token_row.addWidget(QtWidgets.QLabel("Token:"))
+        self.relay_token_edit = QtWidgets.QLineEdit()
+        self.relay_token_edit.setPlaceholderText("your-pairing-token")
+        token_row.addWidget(self.relay_token_edit)
+        relay_layout.addLayout(token_row)
+
+        relay_btn_row = QtWidgets.QHBoxLayout()
+        self.relay_connect_btn = QtWidgets.QPushButton("Connect")
+        self.relay_connect_btn.clicked.connect(self._on_relay_connect)
+        self.relay_connect_btn.setStyleSheet(
+            "background-color: #2196F3; color: white; padding: 8px; font-weight: bold;"
+        )
+        self.relay_disconnect_btn = QtWidgets.QPushButton("Disconnect")
+        self.relay_disconnect_btn.clicked.connect(self._on_relay_disconnect)
+        self.relay_disconnect_btn.setStyleSheet(
+            "background-color: #9E9E9E; color: white; padding: 8px; font-weight: bold;"
+        )
+        relay_btn_row.addWidget(self.relay_connect_btn)
+        relay_btn_row.addWidget(self.relay_disconnect_btn)
+        relay_layout.addLayout(relay_btn_row)
+
+        relay_group.setLayout(relay_layout)
+        layout.addWidget(relay_group)
+
         log_group = QtWidgets.QGroupBox("Activity Log")
         log_layout = QtWidgets.QVBoxLayout()
         self.log_view = QtWidgets.QPlainTextEdit()
@@ -476,7 +631,33 @@ class PyMOLMCPDialog(QtWidgets.QDialog if QT_AVAILABLE else object):
 
     def _tick(self):
         self._update_status()
+        self._update_relay_status()
         self._drain_log()
+
+    def _update_relay_status(self):
+        relay = _relay_instance
+        if not relay:
+            self.relay_status_label.setText("Relay: Disconnected")
+            self.relay_status_label.setStyleSheet("color: gray; font-weight: bold;")
+            self.relay_connect_btn.setEnabled(True)
+            self.relay_disconnect_btn.setEnabled(False)
+            return
+
+        if relay.connected:
+            self.relay_status_label.setText(f"Relay: Connected (token={relay.token})")
+            self.relay_status_label.setStyleSheet("color: green; font-weight: bold;")
+            self.relay_connect_btn.setEnabled(False)
+            self.relay_disconnect_btn.setEnabled(True)
+        elif relay._should_run:
+            self.relay_status_label.setText("Relay: Connecting...")
+            self.relay_status_label.setStyleSheet("color: orange; font-weight: bold;")
+            self.relay_connect_btn.setEnabled(False)
+            self.relay_disconnect_btn.setEnabled(True)
+        else:
+            self.relay_status_label.setText("Relay: Disconnected")
+            self.relay_status_label.setStyleSheet("color: gray; font-weight: bold;")
+            self.relay_connect_btn.setEnabled(True)
+            self.relay_disconnect_btn.setEnabled(False)
 
     def _update_status(self):
         server = _server_instance
@@ -549,9 +730,53 @@ class PyMOLMCPDialog(QtWidgets.QDialog if QT_AVAILABLE else object):
         stop_server()
         self._update_status()
 
+    def _on_relay_connect(self):
+        url = self.relay_url_edit.text().strip()
+        token = self.relay_token_edit.text().strip()
+        if not url or not token:
+            QtWidgets.QMessageBox.warning(
+                self, "Missing info", "Enter both a Relay URL and a Token."
+            )
+            return
+        try:
+            start_relay(url, token)
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(
+                self, "Error", f"Failed to connect to relay:\n{e}"
+            )
+        self._update_relay_status()
+
+    def _on_relay_disconnect(self):
+        stop_relay()
+        self._update_relay_status()
+
 
 _server_instance: Optional[PyMOLTCPServer] = None
+_relay_instance: Optional[PyMOLRelayClient] = None
 _dialog_instance: Optional["PyMOLMCPDialog"] = None
+
+
+def start_relay(url: str, token: str):
+    """Connect the plugin out to a public relay (cloud agent)."""
+    global _relay_instance
+
+    if _relay_instance and _relay_instance._should_run:
+        print("Relay client already running; stopping the previous one.")
+        _relay_instance.stop()
+
+    _relay_instance = PyMOLRelayClient(url, token)
+    _relay_instance.start()
+
+
+def stop_relay():
+    """Disconnect the plugin from the relay."""
+    global _relay_instance
+
+    if not _relay_instance:
+        print("Relay client is not running")
+        return
+
+    _relay_instance.stop()
 
 
 def __init_plugin__(app=None):
@@ -559,8 +784,8 @@ def __init_plugin__(app=None):
     from pymol.plugins import addmenuitemqt
 
     addmenuitemqt('Control Panel', show_dialog)
-    addmenuitemqt('Start Server', start_server)
-    addmenuitemqt('Stop Server', stop_server)
+    addmenuitemqt('Start Server (local)', start_server)
+    addmenuitemqt('Stop Server (local)', stop_server)
     addmenuitemqt('Server Status', show_status)
 
 
