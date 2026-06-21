@@ -174,6 +174,45 @@ class PyMOLCommandHandler:
                     }
                 }
             
+            elif method == "rotate":
+                axis = params.get("axis", "y")
+                angle = params.get("angle", 90)
+                selection = params.get("selection", "")
+
+                if axis not in ("x", "y", "z"):
+                    return {
+                        "error": {
+                            "code": -32602,
+                            "message": "Invalid axis: must be one of 'x', 'y', 'z'"
+                        }
+                    }
+
+                try:
+                    angle = float(angle)
+                except (TypeError, ValueError):
+                    return {
+                        "error": {
+                            "code": -32602,
+                            "message": "Invalid angle: must be a number"
+                        }
+                    }
+
+                if selection:
+                    cmd.rotate(axis, angle, selection)
+                    target = selection
+                else:
+                    cmd.turn(axis, angle)
+                    target = "camera"
+
+                return {
+                    "result": {
+                        "message": f"Rotated {target} by {angle} degrees about {axis}-axis",
+                        "axis": axis,
+                        "angle": angle,
+                        "selection": selection or None
+                    }
+                }
+
             elif method == "render_image":
                 output_path = params.get("output_path")
                 width = params.get("width", 800)

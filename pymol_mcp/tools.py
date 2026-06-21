@@ -99,6 +99,40 @@ def color_selection(color: str, selection: str = "all") -> str:
     return f"✓ {result.get('message', 'Color applied')}"
 
 
+def rotate(axis: str = "y", angle: float = 90, selection: str = "") -> str:
+    """
+    Rotate the camera view or a specific object/selection in PyMOL.
+
+    Args:
+        axis: Rotation axis, one of 'x', 'y', or 'z' (default: 'y')
+        angle: Rotation angle in degrees (default: 90)
+        selection: Optional object/selection to rotate. If empty, rotates the
+            camera view instead of the molecule (default: '')
+
+    Returns:
+        Confirmation message
+
+    Examples:
+        - rotate("y", 90)
+        - rotate("x", 45, "6pyj")
+        - rotate("z", 180)
+    """
+    client = get_client()
+
+    response = client.call("rotate", {
+        "axis": axis,
+        "angle": angle,
+        "selection": selection
+    })
+
+    if "error" in response:
+        error = response["error"]
+        raise Exception(f"PyMOL error ({error['code']}): {error['message']}")
+
+    result = response.get("result", {})
+    return f"✓ {result.get('message', 'Rotation applied')}"
+
+
 def render_image(
     output_path: str,
     width: int = 800,
