@@ -264,6 +264,12 @@ _MENTION_RE = re.compile(r"@agent1[0-9a-z]+\s*", re.IGNORECASE)
 
 _PYMOL_COMMANDS = {"ping", "load", "color", "select", "render", "rotate"}
 
+# Plain messages that should tear down an active interactive cloud GUI session.
+_GUI_DONE_PHRASES = {
+    "done", "close", "close viewer", "close gui", "stop", "stop viewer",
+    "i'm done", "im done", "close the viewer", "close session",
+}
+
 
 def strip_mention(text: str) -> str:
     """Remove a leading @agent1... mention so the actual command/goal remains."""
@@ -414,7 +420,38 @@ def build_agent():
         # Make PyMOL tool calls route to this session's paired PyMOL.
         # In local mode (no relay) there is no token; tools talk to localhost.
         token = relay.get_token(sender) if relay is not None else None
+        # Auto-assign a stable token per sender so an interactive cloud session
+        # has a routing token (for agent control) even without a manual "pair".
+        if relay is not None and not token:
+            import hashlib
+
+            token = "auto-" + hashlib.sha1(sender.encode()).hexdigest()[:12]
+            relay.set_pairing(sender, token)
         agent_graph.current_token.set(token)
+
+        # Safety net: close an active interactive cloud GUI on a plain "done"
+        # message, even if the LLM doesn't call close_interactive_gui itself.
+        if lowered in _GUI_DONE_PHRASES:
+            job_id = agent_graph.get_active_job(token)
+            if job_id:
+                try:
+                    from . import runpod_gui
+                except ImportError:
+                    import runpod_gui  # type: ignore
+                runpod_gui.close_gui(job_id)
+                agent_graph.clear_active_job(token)
+                await ctx.send(
+                    sender,
+                    ChatMessage(
+                        timestamp=datetime.now(timezone.utc),
+                        msg_id=uuid4(),
+                        content=[TextContent(
+                            type="text",
+                            text="Closed the interactive 3D viewer. Let me know if you need anything else.",
+                        )],
+                    ),
+                )
+                return
 
         # 1. Agentic brain (Claude + LangGraph + relay PyMOL tools), if enabled.
         try:

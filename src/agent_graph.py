@@ -23,6 +23,14 @@ try:  # works when imported as part of the `src` package (e.g. tests)
 except ImportError:  # works when research_agent is run as a script (src on path)
     import research_agent as ra
 
+try:  # RunPod interactive cloud GUI (new, opt-in mode)
+    from . import runpod_gui
+except ImportError:
+    try:
+        import runpod_gui  # type: ignore
+    except ImportError:
+        runpod_gui = None  # RunPod client unavailable (e.g. requests missing)
+
 try:  # relay is used when the agent is deployed publicly (Railway)
     from . import relay
 except ImportError:
@@ -46,7 +54,11 @@ SYSTEM_PROMPT = (
     "Prefer search_pdb + pdb_exists to find a real, validated structure; you "
     "may call run_research for a one-shot structured summary. Always confirm a "
     "PDB id exists before loading it in PyMOL. Be concise in your final answer "
-    "and report the target, why it was chosen, and any image you rendered."
+    "and report the target, why it was chosen, and any image you rendered. "
+    "If the user asks to explore, interact with, rotate, or open a structure in "
+    "their browser, use launch_interactive_gui to start a live cloud PyMOL "
+    "session and share the returned link. When the user says they are done with "
+    "the interactive view, call close_interactive_gui to shut it down."
 )
 
 
@@ -91,6 +103,28 @@ RESEARCH_TOOLS = [search_pdb, pdb_exists, search_pubmed, run_research]
 current_token: "contextvars.ContextVar[str | None]" = contextvars.ContextVar(
     "current_token", default=None
 )
+
+
+# --- interactive cloud GUI session tracking ---------------------------------
+# Maps a session key (the paired token, or "_local" when unpaired) to the
+# RunPod job id of that session's live PyMOL GUI. Tools mutate this so the chat
+# handler can close the session on "done"/disconnect (see research_agent.py).
+_active_jobs: "dict[str, str]" = {}
+
+
+def _session_key() -> str:
+    """Key for the current chat session (token, or a local sentinel)."""
+    return current_token.get() or "_local"
+
+
+def get_active_job(token: "str | None") -> "str | None":
+    """Return the RunPod job id for a session token, if one is live."""
+    return _active_jobs.get(token or "_local")
+
+
+def clear_active_job(token: "str | None") -> None:
+    """Forget the tracked job for a session token."""
+    _active_jobs.pop(token or "_local", None)
 
 
 def _run_plugin(method: str, params: dict) -> dict:
@@ -305,6 +339,68 @@ async def _load_pymol_tools():
     return _direct_pymol_tools(), "direct"
 
 
+# --- interactive cloud GUI tools (RunPod, opt-in) ---------------------------
+def _interactive_gui_tools():
+    """Tools that launch/close a live PyMOL GUI on RunPod over noVNC.
+
+    Self-gating: if RunPod isn't configured the tools return a friendly message
+    instead of failing, so they can always be registered.
+    """
+
+    @tool
+    def launch_interactive_gui(pdb_id: str, chain: str = "", epitope: str = "") -> str:
+        """Open a live, interactive PyMOL session in the user's browser.
+
+        Boots a cloud PyMOL GUI preloaded with the given PDB id (optionally
+        styled by chain and a '+'-joined epitope residue list, e.g. '12+15+19')
+        and returns a clickable link. Use this when the user wants to explore,
+        rotate, or interact with a structure rather than just see a static image.
+        """
+        if runpod_gui is None:
+            return "Interactive cloud GUI is unavailable in this build."
+        token = current_token.get()
+        # Reuse an existing session for this chat rather than stacking workers.
+        existing = get_active_job(token)
+        if existing:
+            runpod_gui.close_gui(existing)
+            clear_active_job(token)
+        # If a public relay URL is configured, the cloud PyMOL dials out to it
+        # under this session's token so the agent's relay tools can drive it.
+        relay_url = os.environ.get("PUBLIC_RELAY_URL", "")
+        res = runpod_gui.launch_gui(
+            pdb_id, chain or "", epitope or "",
+            relay_url=relay_url if token else "",
+            token=token or "",
+        )
+        if res.get("ok") and res.get("job_id"):
+            _active_jobs[_session_key()] = res["job_id"]
+            control = (
+                " I can also load/color/render in this live session for you."
+                if relay_url and token else ""
+            )
+            return (
+                f"Interactive 3D viewer ready: [Open in browser]({res['url']})\n"
+                f"Click the link to explore the structure.{control} Tell me when "
+                "you're done so I can shut the session down."
+            )
+        return res.get("message", "Failed to launch the interactive GUI.")
+
+    @tool
+    def close_interactive_gui() -> str:
+        """Shut down this chat session's live interactive PyMOL GUI (stops billing)."""
+        if runpod_gui is None:
+            return "Interactive cloud GUI is unavailable in this build."
+        token = current_token.get()
+        job_id = get_active_job(token)
+        if not job_id:
+            return "There is no interactive session to close."
+        res = runpod_gui.close_gui(job_id)
+        clear_active_job(token)
+        return res.get("message", "Closed the interactive session.")
+
+    return [launch_interactive_gui, close_interactive_gui]
+
+
 # --- graph construction -----------------------------------------------------
 _graph = None
 _tool_source = None
@@ -326,7 +422,7 @@ async def get_graph():
 
     pymol_tools, source = await _load_pymol_tools()
     _tool_source = source
-    tools = RESEARCH_TOOLS + pymol_tools
+    tools = RESEARCH_TOOLS + pymol_tools + _interactive_gui_tools()
 
     model = ChatAnthropic(
         model=os.environ.get("ANTHROPIC_MODEL", DEFAULT_MODEL),
