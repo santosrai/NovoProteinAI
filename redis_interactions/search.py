@@ -6,6 +6,7 @@ Example:
 """
 
 import argparse
+import sys
 
 from redisvl.query import VectorQuery
 from redisvl.query.filter import Num, Tag
@@ -44,6 +45,11 @@ def search(question: str, k: int = 5, **filters) -> list[dict]:
 
 
 def main() -> None:
+    # Paper text often contains non-cp1252 Unicode (e.g. typographic spaces);
+    # force UTF-8 so printing results doesn't crash on the Windows console.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
     p = argparse.ArgumentParser(description="Vector search over ingested papers.")
     p.add_argument("question")
     p.add_argument("--k", type=int, default=5)

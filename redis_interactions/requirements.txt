@@ -3,7 +3,9 @@ redis>=5.0
 redisvl>=0.4.0
 python-dotenv>=1.0
 
-# PDF extraction
+# PDF extraction. PyMuPDF gives layout-aware (reading-order) text for
+# multi-column journal PDFs; pypdf is kept as a fallback.
+PyMuPDF>=1.24
 pypdf>=4.0
 
 # Semantic chunking + embeddings (EmbeddingGemma, open weights)

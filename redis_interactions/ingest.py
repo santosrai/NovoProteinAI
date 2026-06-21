@@ -15,27 +15,97 @@ import argparse
 import os
 import re
 
-from pypdf import PdfReader
-
 from embeddings import embed_documents
 from chunking import semantic_chunks
-from schema import create_index
+from schema import KEY_PREFIX, create_index
+
+# Canonical section name -> regex of headings that map to it. Order matters:
+# the first match wins. Covers the common layout of research papers.
+_SECTION_PATTERNS = [
+    ("abstract", r"abstract|summary"),
+    ("introduction", r"introduction|background"),
+    ("results", r"results"),
+    ("discussion", r"discussion"),
+    ("methods", r"methods|materials\s+and\s+methods|experimental(\s+procedures)?"),
+    ("conclusion", r"conclusions?|concluding\s+remarks"),
+    ("acknowledgements", r"acknowledge?ments"),
+    ("references", r"references|bibliography"),
+]
+
+# A heading is a short line that is (optionally numbered and) exactly one of the
+# section words above, e.g. "Methods", "2. Results", "Materials and Methods".
+_HEADING_RE = re.compile(
+    r"^\s*(?:\d+\.?\s+)?(?:" + "|".join(p for _, p in _SECTION_PATTERNS) + r")\s*:?\s*$",
+    re.IGNORECASE,
+)
 
 
 def extract_text(pdf_path: str) -> str:
-    """Concatenate text from every page of a PDF."""
-    reader = PdfReader(pdf_path)
-    pages = [page.extract_text() or "" for page in reader.pages]
-    text = "\n".join(pages)
-    # Collapse runaway whitespace that PDF extraction tends to produce.
+    """Extract text from a PDF, preserving line breaks for section detection.
+
+    Prefers PyMuPDF with sorted (reading-order) extraction, which handles the
+    two-column layout of journals like Nature far better than pypdf. Falls back
+    to pypdf if PyMuPDF isn't installed.
+    """
+    try:
+        import fitz  # PyMuPDF
+
+        with fitz.open(pdf_path) as doc:
+            pages = [page.get_text("text", sort=True) for page in doc]
+        text = "\n".join(pages)
+    except ImportError:
+        from pypdf import PdfReader
+
+        reader = PdfReader(pdf_path)
+        text = "\n".join(page.extract_text() or "" for page in reader.pages)
+
+    # Re-join words split by end-of-line hyphenation: "pro-\ntein" -> "protein".
+    text = re.sub(r"(\w)-\n(\w)", r"\1\2", text)
+    # Collapse horizontal whitespace but keep newlines (needed for headings).
     return re.sub(r"[ \t]+", " ", text).strip()
 
 
-def build_records(chunks: list[str], meta: dict) -> list[dict]:
-    """Attach metadata + embeddings to each chunk, ready for index.load."""
-    vectors = embed_documents(chunks)
+def _classify_heading(line: str) -> str | None:
+    """Return the canonical section name for a heading line, else None."""
+    if not _HEADING_RE.match(line):
+        return None
+    lowered = line.lower()
+    for name, pattern in _SECTION_PATTERNS:
+        if re.search(pattern, lowered):
+            return name
+    return None
+
+
+def extract_sections(text: str) -> list[tuple[str, str]]:
+    """Split text into (section_name, section_text) pairs by heading lines.
+
+    Text before the first detected heading is labelled "". If no headings are
+    found at all (e.g. messy extraction), returns a single ("", text) pair so
+    downstream chunking still works.
+    """
+    sections: list[tuple[str, list[str]]] = [("", [])]
+    for line in text.split("\n"):
+        name = _classify_heading(line.strip())
+        if name:
+            sections.append((name, []))
+        else:
+            sections[-1][1].append(line)
+
+    result = [(name, "\n".join(lines).strip()) for name, lines in sections]
+    result = [(name, body) for name, body in result if body]
+    return result or [("", text)]
+
+
+def build_records(chunked: list[tuple[str, str]], meta: dict) -> list[dict]:
+    """Attach metadata + embeddings to each (section, chunk), for index.load.
+
+    `chunked` is a list of (section_name, chunk_text). Embeddings are computed
+    in a single batch for efficiency.
+    """
+    texts = [chunk for _, chunk in chunked]
+    vectors = embed_documents(texts)
     records = []
-    for i, (chunk, vec) in enumerate(zip(chunks, vectors)):
+    for i, ((section, chunk), vec) in enumerate(zip(chunked, vectors)):
         records.append(
             {
                 "paper_id": meta["paper_id"],
@@ -44,7 +114,8 @@ def build_records(chunks: list[str], meta: dict) -> list[dict]:
                 "doi": meta.get("doi", ""),
                 "year": meta.get("year", 0),
                 "source": meta.get("source", ""),
-                "section": meta.get("section", ""),
+                # Detected section wins; fall back to any value passed in meta.
+                "section": section or meta.get("section", ""),
                 "chunk_index": i,
                 "content": chunk,
                 "embedding": vec,
@@ -53,21 +124,36 @@ def build_records(chunks: list[str], meta: dict) -> list[dict]:
     return records
 
 
-def ingest_pdf(pdf_path: str, meta: dict) -> int:
-    """Ingest a single PDF; returns the number of chunks stored."""
-    index = create_index()  # idempotent
+def ingest_pdf(pdf_path: str, meta: dict, index=None) -> int:
+    """Ingest a single PDF; returns the number of chunks stored.
+
+    Pass an existing `index` to avoid re-creating it per file in a batch.
+    """
+    if index is None:
+        index = create_index()  # idempotent
     text = extract_text(pdf_path)
     if not text:
         print(f"  ! no extractable text in {pdf_path}, skipping")
         return 0
-    chunks = semantic_chunks(text)
-    records = build_records(chunks, meta)
 
-    # Stable per-chunk keys: chunk:{paper_id}:{chunk_index}
+    # Chunk each section independently so chunks never straddle a section
+    # boundary, and tag every chunk with its section.
+    chunked: list[tuple[str, str]] = []
+    for section, body in extract_sections(text):
+        for chunk in semantic_chunks(body):
+            chunked.append((section, chunk))
+
+    records = build_records(chunked, meta)
+    if not records:
+        print(f"  ! no chunks produced from {pdf_path}, skipping")
+        return 0
+
+    # Stable per-chunk keys: {KEY_PREFIX}{paper_id}:{chunk_index}. The prefix
+    # MUST match the index prefix or the index won't pick the documents up.
     index.load(
         records,
         id_field=None,
-        keys=[f"chunk:{meta['paper_id']}:{r['chunk_index']}" for r in records],
+        keys=[f"{KEY_PREFIX}{meta['paper_id']}:{r['chunk_index']}" for r in records],
     )
     print(f"  loaded {len(records)} chunks from {os.path.basename(pdf_path)}")
     return len(records)
@@ -98,9 +184,13 @@ def main() -> None:
             for f in os.listdir(args.path)
             if f.lower().endswith(".pdf")
         ]
+        index = create_index()  # create once, reuse across the batch
         total = 0
         for pdf in pdfs:
-            total += ingest_pdf(pdf, _meta_from_filename(pdf))
+            try:
+                total += ingest_pdf(pdf, _meta_from_filename(pdf), index=index)
+            except Exception as exc:  # one bad PDF shouldn't abort the batch
+                print(f"  ! failed to ingest {os.path.basename(pdf)}: {exc}")
         print(f"Done. {total} chunks from {len(pdfs)} PDFs.")
         return
 

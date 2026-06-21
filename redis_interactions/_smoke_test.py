@@ -1,7 +1,8 @@
 import os
 from dotenv import load_dotenv
 
-load_dotenv()
+# Load the .env sitting next to this script, regardless of the cwd it's run from.
+load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
 EXPECTED_DIM = int(os.getenv("EMBEDDING_DIM", "768"))
 

@@ -57,9 +57,7 @@ SCHEMA_DICT = {
 
 def get_index() -> SearchIndex:
     """Return a RedisVL SearchIndex bound to the live Redis connection."""
-    index = SearchIndex.from_dict(SCHEMA_DICT)
-    index.connect(get_redis_url())
-    return index
+    return SearchIndex.from_dict(SCHEMA_DICT, redis_url=get_redis_url())
 
 
 def create_index(overwrite: bool = False) -> SearchIndex:
