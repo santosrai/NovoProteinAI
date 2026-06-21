@@ -38,7 +38,17 @@ logger = logging.getLogger("novoproteinai.main")
 
 
 def _run_agent():
-    """Run the uAgent (blocking) in its own thread/loop."""
+    """Run the uAgent (blocking) in its own thread/loop.
+
+    Python 3.12 no longer auto-creates an event loop in non-main threads, and
+    uagents.Agent() calls asyncio.get_event_loop() at construction time. So we
+    must create and install a loop for this thread before building the agent.
+    """
+    import asyncio
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
     try:
         from src.research_agent import build_agent
     except ImportError:
