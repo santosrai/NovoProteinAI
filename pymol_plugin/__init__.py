@@ -646,6 +646,9 @@ def __init_plugin__(app=None):
     addmenuitemqt('Stop Server', stop_server)
     addmenuitemqt('Server Status', show_status)
 
+    # Auto-start TCP server on plugin load
+    start_server()
+
 
 def show_dialog():
     """Open the control panel dialog."""
