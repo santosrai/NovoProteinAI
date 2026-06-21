@@ -15,11 +15,17 @@ mcp = FastMCP("PyMOL MCP Bridge")
 def load_structure(source: str, object_name: Optional[str] = None) -> str:
     """
     Load a molecular structure into PyMOL.
-    
+
+    Opens local structure files (including your own non-PDB CIF files) or
+    fetches a structure from the PDB by ID.
+
     Args:
-        source: File path to structure file (PDB, CIF, MOL2, SDF) or PDB ID (e.g., '1ABC')
+        source: A local file path or a 4-character PDB ID. Supported local
+            extensions (optionally gzipped): .pdb, .ent, .cif, .mmcif, .mcif,
+            .mol2, .mol, .sdf, .xyz, .pdbqt, .mae. The file must exist on the
+            machine where PyMOL is running.
         object_name: Optional name for the loaded object. If not provided, uses filename or PDB ID
-    
+
     Returns:
         Success message with the object name
     """

@@ -1,7 +1,7 @@
 {
   "mcpServers": {
     "pymol": {
-      "command": "python",
+      "command": "/opt/anaconda3/bin/python",
       "args": ["-m", "pymol_mcp.server"],
       "env": {
         "PYMOL_HOST": "localhost",

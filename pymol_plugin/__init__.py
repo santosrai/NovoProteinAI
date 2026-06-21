@@ -1,3 +1,4 @@
+import os
 import socket
 import struct
 import json
@@ -38,6 +39,85 @@ def _log(message: str):
     except queue.Full:
         pass
     logger.info(message)
+
+
+# Structure file extensions PyMOL can load from disk (lower-case, without an
+# optional trailing ".gz"). Used to decide whether a source string is a local
+# file path versus a PDB ID to fetch from the network.
+STRUCTURE_EXTENSIONS = (
+    ".pdb", ".ent", ".cif", ".mmcif", ".mcif",
+    ".mol2", ".mol", ".sdf", ".xyz", ".pdbqt", ".mae",
+)
+
+
+def _sanitize_object_name(name: str) -> str:
+    """Make a string safe to use as a PyMOL object name.
+
+    PyMOL object names should avoid whitespace and characters that have
+    meaning in selection expressions, so we replace anything that is not
+    alphanumeric or an underscore with an underscore.
+    """
+    safe = "".join(c if (c.isalnum() or c == "_") else "_" for c in name).strip("_")
+    return safe or "structure"
+
+
+def _looks_like_structure_file(source: str) -> bool:
+    """Heuristic: does this source string refer to a local file path?
+
+    True if it has a known structure extension (optionally gzipped) or it
+    otherwise looks like a path (contains a separator or starts with ~).
+    """
+    lowered = source.lower()
+    if lowered.endswith(".gz"):
+        lowered = lowered[:-3]
+    if lowered.endswith(STRUCTURE_EXTENSIONS):
+        return True
+    return "/" in source or "\\" in source or source.startswith("~")
+
+
+def resolve_structure_source(source: str, object_name: str = "") -> Dict[str, Any]:
+    """Decide how to load ``source`` and validate it (no PyMOL needed).
+
+    Returns a dict describing the action:
+      - {"error": "..."} when the input is invalid or the file is missing.
+      - {"mode": "load", "path": <abs path>, "object_name": <name>} for a
+        local file (PDB/CIF/etc.), including non-PDB CIF files.
+      - {"mode": "fetch", "source": <id>, "object_name": <name>} for a PDB ID.
+
+    Kept free of any PyMOL imports so it can be unit-tested directly.
+    """
+    if not source or not source.strip():
+        return {"error": "Missing required parameter: source"}
+
+    source = source.strip()
+
+    if _looks_like_structure_file(source):
+        path = os.path.abspath(os.path.expanduser(os.path.expandvars(source)))
+        if not os.path.exists(path):
+            return {"error": f"File not found: {path}"}
+        if not os.path.isfile(path):
+            return {"error": f"Not a file: {path}"}
+
+        if object_name:
+            obj = object_name
+        else:
+            base = os.path.basename(path)
+            if base.lower().endswith(".gz"):
+                base = base[:-3]
+            obj = os.path.splitext(base)[0]
+
+        return {
+            "mode": "load",
+            "path": path,
+            "object_name": _sanitize_object_name(obj),
+        }
+
+    # Otherwise treat it as a PDB ID to fetch from the network.
+    return {
+        "mode": "fetch",
+        "source": source,
+        "object_name": object_name or source,
+    }
 
 
 class JSONRPCProtocol:
@@ -110,26 +190,29 @@ class PyMOLCommandHandler:
             
             elif method == "load_structure":
                 source = params.get("source")
-                object_name = params.get("object_name", "")
-                
-                if not source:
+                object_name = params.get("object_name", "") or ""
+
+                resolved = resolve_structure_source(source or "", object_name)
+
+                if "error" in resolved:
                     return {
                         "error": {
                             "code": -32602,
-                            "message": "Missing required parameter: source"
+                            "message": resolved["error"]
                         }
                     }
-                
-                if source.endswith(('.pdb', '.cif', '.mol2', '.sdf')):
-                    cmd.load(source, object_name or None)
-                    obj_name = object_name or source.split('/')[-1].split('.')[0]
+
+                obj_name = resolved["object_name"]
+                if resolved["mode"] == "load":
+                    cmd.load(resolved["path"], obj_name)
+                    message = f"Loaded structure from file: {obj_name}"
                 else:
-                    cmd.fetch(source, object_name or source)
-                    obj_name = object_name or source
-                
+                    cmd.fetch(resolved["source"], obj_name)
+                    message = f"Fetched structure: {obj_name}"
+
                 return {
                     "result": {
-                        "message": f"Loaded structure: {obj_name}",
+                        "message": message,
                         "object_name": obj_name
                     }
                 }

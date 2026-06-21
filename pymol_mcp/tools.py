@@ -8,18 +8,27 @@ logger = logging.getLogger(__name__)
 def load_structure(source: str, object_name: Optional[str] = None) -> str:
     """
     Load a molecular structure into PyMOL.
-    
+
+    Use this to open local (non-PDB) structure files such as your own CIF
+    files, as well as to fetch structures from the PDB by ID.
+
     Args:
-        source: File path to structure file (PDB, CIF, MOL2, SDF) or PDB ID (e.g., '1ABC')
-        object_name: Optional name for the loaded object. If not provided, uses filename or PDB ID
-    
+        source: Either a local file path or a 4-character PDB ID.
+            Supported local file extensions (optionally gzipped, e.g. .cif.gz):
+            .pdb, .ent, .cif, .mmcif, .mcif, .mol2, .mol, .sdf, .xyz, .pdbqt, .mae.
+            The path may be relative, absolute, or use '~'. It must exist on the
+            machine where PyMOL is running.
+        object_name: Optional name for the loaded object. If omitted, the
+            filename (without extension) or the PDB ID is used.
+
     Returns:
         Success message with the object name
-    
+
     Examples:
         - load_structure("/path/to/protein.pdb")
+        - load_structure("~/Downloads/my_design.cif")
+        - load_structure("./structures/molecule.cif.gz", "molecule")
         - load_structure("1ABC", "my_protein")
-        - load_structure("/data/molecule.cif", "molecule")
     """
     client = get_client()
     
