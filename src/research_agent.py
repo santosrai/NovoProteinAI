@@ -382,7 +382,7 @@ def build_agent():
 
             if agent_graph.is_agentic_enabled():
                 ctx.logger.info(f"Agentic goal: {text}")
-                reply_text = await agent_graph.run_agent(text)
+                reply_text = await agent_graph.run_agent(text, thread_id=sender)
         except Exception as exc:  # fall back to the deterministic path
             ctx.logger.warning(f"Agentic path failed, falling back: {exc}")
             reply_text = None

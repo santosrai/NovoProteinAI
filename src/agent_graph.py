@@ -27,6 +27,48 @@ if REPO_ROOT not in sys.path:
 
 DEFAULT_MODEL = "claude-3-5-sonnet-latest"
 
+BINDER_COMPARISON_WORKFLOW = (
+    "When the user has MULTIPLE binder designs (e.g. several loaded complexes "
+    "or a folder of design outputs) and wants to compare, rank, or evaluate "
+    "them, run the Binder Interface Comparison workflow: "
+    "(1) Identify chains in each complex: the TARGET (antigen) chain and the "
+    "BINDER (designed nanobody/protein) chain. For these design outputs the "
+    "convention is chain A = target, chain B = binder; confirm from "
+    "sequence/context or ask the user if ambiguous. "
+    "(2) Before computing, verify every object is actually loaded (the PyMOL "
+    "session can silently drop objects); if a needed object is missing, reload "
+    "it first. "
+    "(3) For EACH design, count binder interface residues at ~4 Angstroms with "
+    "pymol_select_atoms using a per-object selection so contacts never cross "
+    "between objects: byres (OBJ and chain B within 4 of (OBJ and chain A)) and "
+    "name CA. The returned atom count equals the residue count (one CA per "
+    "residue). Always scope 'within' inside a single object; never run it "
+    "across all loaded structures at once. "
+    "(4) Highlight in PyMOL: first gray out the whole complex (color gray80 on "
+    "all designs), then color the interface residues a distinct color (use "
+    "byres WITHOUT 'and name CA' so full residues are colored); you may use "
+    "different colors per design or per chain. Then render an image with "
+    "pymol_render_image. If many designs are overlaid and the view is crowded, "
+    "isolate the top design(s) and re-render for clarity. "
+    "(5) Rank the designs by binder interface residue count (highest = most "
+    "buried paratope) and present a concise table. Optionally also compute the "
+    "reciprocal (target residues near the binder) and flag large asymmetries "
+    "between the two counts, since they often indicate glancing contacts or "
+    "clashes rather than a real interface. "
+    "(6) State clearly that residue-contact count is a proxy for interface "
+    "size, not binding affinity. "
+    "Robustness: PyMOL MCP calls occasionally fail on the first attempt after "
+    "an idle period with a broken-pipe or no-response error; retry once before "
+    "reporting a failure."
+)
+
+MEMORY_GUIDANCE = (
+    "You retain the full conversation. If the user refers to 'it', 'that "
+    "structure', or a previous result without naming it, resolve the reference "
+    "from earlier turns instead of asking again. Only ask for clarification if "
+    "it is genuinely ambiguous."
+)
+
 SYSTEM_PROMPT = (
     "You are NovoProteinAI, an agentic research assistant for vaccine and "
     "therapeutic design. Given a plain-English goal you decide which tools to "
@@ -36,7 +78,10 @@ SYSTEM_PROMPT = (
     "Prefer search_pdb + pdb_exists to find a real, validated structure; you "
     "may call run_research for a one-shot structured summary. Always confirm a "
     "PDB id exists before loading it in PyMOL. Be concise in your final answer "
-    "and report the target, why it was chosen, and any image you rendered."
+    "and report the target, why it was chosen, and any image you rendered. "
+    + BINDER_COMPARISON_WORKFLOW
+    + " "
+    + MEMORY_GUIDANCE
 )
 
 
@@ -169,6 +214,7 @@ async def get_graph():
 
     from langchain_anthropic import ChatAnthropic
     from langgraph.prebuilt import create_react_agent
+    from langgraph.checkpoint.memory import MemorySaver
 
     pymol_tools, source = await _load_pymol_tools()
     _tool_source = source
@@ -178,7 +224,9 @@ async def get_graph():
         model=os.environ.get("ANTHROPIC_MODEL", DEFAULT_MODEL),
         temperature=0,
     )
-    _graph = create_react_agent(model, tools, prompt=SYSTEM_PROMPT)
+    _graph = create_react_agent(
+        model, tools, prompt=SYSTEM_PROMPT, checkpointer=MemorySaver()
+    )
     return _graph
 
 
@@ -198,10 +246,16 @@ def _extract_text(message) -> str:
     return str(content)
 
 
-async def run_agent(message: str) -> str:
-    """Run the agentic loop on a user message and return Claude's final reply."""
+async def run_agent(message: str, thread_id: str = "default") -> str:
+    """Run the agentic loop on a user message and return Claude's final reply.
+
+    Conversation history is retained per ``thread_id`` via the graph's
+    in-memory checkpointer, so only the new message needs to be passed each
+    turn. History is kept in memory only and resets when the process restarts.
+    """
     graph = await get_graph()
     result = await graph.ainvoke(
-        {"messages": [{"role": "user", "content": message}]}
+        {"messages": [{"role": "user", "content": message}]},
+        config={"configurable": {"thread_id": thread_id}},
     )
     return _extract_text(result["messages"][-1])
