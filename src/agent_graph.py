@@ -14,6 +14,7 @@ deterministic router in research_agent.py.
 import asyncio
 import contextvars
 import os
+import re
 import sys
 
 from langchain_core.tools import tool
@@ -34,6 +35,12 @@ except ImportError:
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
+
+# The redis_interactions package uses bare imports (e.g. `from schema import ...`),
+# so its own directory must be importable for `search_papers` to work.
+REDIS_DIR = os.path.join(REPO_ROOT, "redis_interactions")
+if os.path.isdir(REDIS_DIR) and REDIS_DIR not in sys.path:
+    sys.path.insert(0, REDIS_DIR)
 
 DEFAULT_MODEL = "claude-sonnet-4-6"
 
@@ -86,7 +93,15 @@ SYSTEM_PROMPT = (
     "id, chain) and supporting citations, then use the PyMOL tools to load the "
     "structure, color it, highlight epitope residues, and render an image. "
     "Prefer search_pdb + pdb_exists to find a real, validated structure; you "
-    "may call run_research for a one-shot structured summary. Always confirm a "
+    "may call run_research for a one-shot structured summary. "
+    "When a question is about a specific paper or protein the project has "
+    "ingested, call search_papers to retrieve the relevant chunks: each result "
+    "includes the chunk text and any pdb_candidates found in that same chunk. "
+    "Choose the PDB id whose surrounding context matches the protein in the "
+    "prompt, then ALWAYS confirm it with pdb_exists before loading it (the "
+    "candidates are extracted from the paper's wording and may be wrong). If no "
+    "candidate validates, fall back to search_pdb. "
+    "Always confirm a "
     "PDB id exists before loading it in PyMOL. Be concise in your final answer "
     "and report the target, why it was chosen, and any image you rendered. "
     + BINDER_COMPARISON_WORKFLOW
@@ -127,7 +142,78 @@ def run_research(goal: str) -> dict:
     return ra.run_research(goal)
 
 
-RESEARCH_TOOLS = [search_pdb, pdb_exists, search_pubmed, run_research]
+# --- paper RAG tool (Redis vector search) -----------------------------------
+# A PDB id is a digit (1-9) followed by three alphanumerics, e.g. "6VXX".
+_PDB_CODE = r"[1-9][A-Za-z0-9]{3}"
+# High-confidence: an id introduced by a cue word ("PDB 6VXX", "RCSB: 6vxx",
+# "Protein Data Bank entry 6VXX"). Anchoring to a cue avoids the flood of false
+# positives a bare 4-char regex would produce on ordinary tokens.
+_PDB_CUE_RE = re.compile(
+    r"(?:PDB(?:\s*(?:ID|code|codes|entry|entries|accession))?|RCSB|"
+    r"Protein\s+Data\s+Bank)\b[^A-Za-z0-9]{0,15}(" + _PDB_CODE + r")\b",
+    re.IGNORECASE,
+)
+
+
+def _extract_pdb_candidates(text: str) -> list:
+    """Return PDB ids that appear next to a PDB/RCSB cue word in `text`.
+
+    These are *candidates* from the paper's own wording, not verified ids; the
+    agent should confirm each with `pdb_exists` before loading it in PyMOL.
+    """
+    seen: list[str] = []
+    for match in _PDB_CUE_RE.finditer(text or ""):
+        code = match.group(1).upper()
+        if code not in seen:
+            seen.append(code)
+    return seen
+
+
+@tool
+def search_papers(
+    query: str,
+    k: int = 5,
+    paper_id: str = "",
+    year_min: int = 0,
+) -> list:
+    """Semantic search over ingested research papers (Redis vector index).
+
+    Use this to ground answers in the project's own papers and to find the PDB
+    structure a paper refers to. Returns up to `k` matching chunks; each result
+    is a dict with: title, paper_id, section, year, source, content (the chunk
+    text), and pdb_candidates (PDB ids detected in that same chunk's text).
+
+    The pdb_candidates come from the paper's wording and are NOT verified —
+    pick the one that fits the protein/context and confirm it with pdb_exists
+    before loading it in PyMOL. Optionally filter by paper_id or year_min.
+    """
+    from search import search as _search  # lazy: avoids hard dep at import time
+
+    filters = {}
+    if paper_id:
+        filters["paper_id"] = paper_id
+    if year_min:
+        filters["year_min"] = year_min
+
+    rows = _search(query, k=k, **filters)
+    results = []
+    for r in rows:
+        content = r.get("content", "")
+        results.append(
+            {
+                "title": r.get("title", ""),
+                "paper_id": r.get("paper_id", ""),
+                "section": r.get("section", ""),
+                "year": r.get("year", ""),
+                "source": r.get("source", ""),
+                "content": content[:1200],
+                "pdb_candidates": _extract_pdb_candidates(content),
+            }
+        )
+    return results
+
+
+RESEARCH_TOOLS = [search_pdb, pdb_exists, search_pubmed, run_research, search_papers]
 
 
 # --- PyMOL tools: relay transport (deployed / public) -----------------------
