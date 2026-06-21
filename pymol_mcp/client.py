@@ -115,7 +115,7 @@ class PyMOLClient:
                         "message": "Not connected to PyMOL. Is the plugin running?"
                     }
                 }
-        
+
         self.request_id += 1
         request = {
             "jsonrpc": "2.0",
@@ -123,29 +123,40 @@ class PyMOLClient:
             "params": params or {},
             "id": self.request_id
         }
-        
+
         try:
             request_data = JSONRPCProtocol.encode_message(request)
             self.socket.sendall(request_data)
-            
             response = JSONRPCProtocol.read_message(self.socket, self.config.timeout)
-            
+
             if not response:
+                # Socket in CLOSE_WAIT or timed out — reconnect and retry once
+                logger.warning("No response from PyMOL, attempting reconnect...")
                 self.connected = False
-                return {
-                    "error": {
-                        "code": -32300,
-                        "message": "No response from PyMOL"
-                    }
-                }
-            
+                if not self.connect():
+                    return {"error": {"code": -32300, "message": "No response from PyMOL and reconnect failed"}}
+                self.socket.sendall(request_data)
+                response = JSONRPCProtocol.read_message(self.socket, self.config.timeout)
+                if not response:
+                    self.connected = False
+                    return {"error": {"code": -32300, "message": "No response from PyMOL after reconnect"}}
+
             if "error" in response:
                 logger.error(f"PyMOL error: {response['error']}")
-            
+
             return response
-        
+
         except socket.error as e:
-            logger.error(f"Socket error during call: {e}")
+            logger.warning(f"Socket error ({e}), reconnecting...")
+            self.connected = False
+            if self.connect():
+                try:
+                    self.socket.sendall(request_data)
+                    response = JSONRPCProtocol.read_message(self.socket, self.config.timeout)
+                    if response:
+                        return response
+                except Exception:
+                    pass
             self.connected = False
             return {
                 "error": {
