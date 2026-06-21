@@ -160,12 +160,15 @@ async def handle_render(ctx: Context, sender: str, msg: RenderImageRequest):
 
 _ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 
-_INTENT_SYSTEM = """You are PyMOLS, an AI assistant that controls PyMOL molecular visualization software and answers questions about structural biology and proteins.
+_INTENT_SYSTEM = """You are PyMOLS, a friendly AI assistant that controls PyMOL and loves talking about structural biology.
 
-Classify the user's message and return ONLY a JSON object (no markdown, no explanation).
+Return ONLY a JSON object — no markdown, no explanation.
 
-## If the message is a PyMOL command (load, color, render, ping/status):
-{"intent": "pymol_command", "tool": "<tool_name>", "params": {<params>}}
+## Single PyMOL action:
+{"intent": "pymol_command", "tool": "<tool>", "params": {...}}
+
+## Multiple actions in one message (e.g. "load 2HHB and color it blue"):
+{"intent": "pymol_commands", "commands": [{"tool": "<tool>", "params": {...}}, ...]}
 
 Available tools:
 - "load_structure": params: {"source": "<4-char PDB ID>", "object_name": ""}
@@ -175,18 +178,17 @@ Available tools:
 - "render_image": params: {"output_path": "", "width": 800, "height": 600, "ray_trace": false}
 - "ping_pymol": params: {}
 
-## If the message is a question about proteins, biology, structures, or PyMOL usage:
-{"intent": "conversation", "reply": "<helpful answer in 2-3 sentences>"}
+## Biology/protein/PyMOL question — answer like a knowledgeable friend, short and direct, no bullet lists:
+{"intent": "conversation", "reply": "<2-3 friendly sentences>"}
 
-## If the message is unrelated to molecular biology or PyMOL:
-{"intent": "out_of_scope", "reply": "I'm PyMOLS, a molecular visualization agent. I can load protein structures (e.g. 'load 2HHB'), color chains, render images, and answer questions about proteins and structural biology."}
+## Unrelated to molecular biology — one brief sentence, friendly nudge back:
+{"intent": "out_of_scope", "reply": "<one sentence>"}
 
 Examples:
+"load 2HHB and make it blue" → {"intent":"pymol_commands","commands":[{"tool":"load_structure","params":{"source":"2HHB","object_name":""}},{"tool":"color_selection","params":{"color":"blue","selection":"all"}}]}
 "color the chain A red" → {"intent":"pymol_command","tool":"color_selection","params":{"color":"red","selection":"chain A"}}
-"load 2HHB" → {"intent":"pymol_command","tool":"load_structure","params":{"source":"2HHB","object_name":""}}
-"what is hemoglobin?" → {"intent":"conversation","reply":"Hemoglobin is an iron-containing oxygen-transport protein found in red blood cells. It consists of four subunits (chains A, B, C, D) each carrying a heme group that binds oxygen. PDB entry 2HHB is the classic deoxy-hemoglobin structure."}
-"explain chain A" → {"intent":"conversation","reply":"In PyMOL, chain A refers to one polypeptide chain within a multi-chain protein complex. You can select it with 'chain A' and color or analyze it independently from other chains."}
-"what's the weather?" → {"intent":"out_of_scope","reply":"I'm PyMOLS, a molecular visualization agent. I can load protein structures (e.g. 'load 2HHB'), color chains, render images, and answer questions about proteins and structural biology."}"""
+"what is hemoglobin?" → {"intent":"conversation","reply":"Hemoglobin is the oxygen-carrying protein in red blood cells — four chains each hugging a heme group that grabs O2 in the lungs and drops it off in tissues. PDB 2HHB is the classic deoxy form, great for visualizing the T-state conformation."}
+"what's the weather?" → {"intent":"out_of_scope","reply":"Ha, weather's outside my expertise — I live in PDB land. Ask me to load a structure or tell you about a protein!"}"""
 
 
 async def _parse_with_llm(text: str) -> tuple[str, dict]:
@@ -206,6 +208,9 @@ async def _parse_with_llm(text: str) -> tuple[str, dict]:
         data = json.loads(raw)
         intent = data.get("intent", "out_of_scope")
 
+        if intent == "pymol_commands":
+            return "__commands__", {"commands": data.get("commands", [])}
+
         if intent == "pymol_command":
             tool = data.get("tool", "")
             params = data.get("params", {})
@@ -217,7 +222,6 @@ async def _parse_with_llm(text: str) -> tuple[str, dict]:
                 )
             return tool, params
 
-        # conversation or out_of_scope → direct reply, no tool execution
         reply = data.get("reply", "I can help with PyMOL commands and protein biology questions.")
         return "__reply__", {"text": reply}
 
@@ -265,6 +269,31 @@ async def _parse_chat_command(text: str) -> tuple[str, dict]:
     return _parse_with_regex(text)
 
 
+_ACTION_REPLIES = {
+    "load_structure": lambda p, t: f"Got it — {t}",
+    "color_selection": lambda p, t: f"Done! {t}",
+    "render_image": lambda p, t: f"Rendered! Saved as {p.get('output_path', '').split('/')[-1]}",
+    "ping_pymol": lambda p, t: f"PyMOL is alive ✓ ({t})",
+}
+
+
+async def _execute_tool(tool: str, params: dict) -> str:
+    try:
+        if tool == "load_structure":
+            params["source"] = validate_source(params["source"])
+        elif tool == "color_selection":
+            params["color"] = validate_color(params["color"])
+        elif tool == "render_image":
+            params["output_path"] = validate_output_path(params["output_path"])
+    except ValueError as e:
+        return f"Error: {e}"
+    result = await bridge.call_tool(tool, params)
+    if not result["success"]:
+        return f"Hmm, that didn't work: {result['text']}"
+    fmt = _ACTION_REPLIES.get(tool)
+    return fmt(params, result["text"]) if fmt else result["text"]
+
+
 chat_proto = Protocol(spec=chat_protocol_spec)
 
 
@@ -289,28 +318,18 @@ async def handle_chat(ctx: Context, sender: str, msg: ChatMessage):
     text = text.strip()
 
     if not text:
-        reply = "Hi! I'm PyMOLS. I can load protein structures, color chains, render images, and answer questions about molecular biology. Try: 'load 2HHB', 'color chain A red', or 'what is hemoglobin?'"
+        reply = "Hi! I'm PyMOLS. Ask me to load a protein, color a chain, render an image, or just ask a biology question!"
     else:
         tool, params = await _parse_chat_command(text)
         if tool == "__reply__":
             reply = params["text"]
-        elif not tool:
-            reply = "I can load protein structures, color chains, render images, and answer protein biology questions. Try: 'load 2HHB' or 'what is hemoglobin?'"
+        elif tool == "__commands__":
+            parts = [await _execute_tool(cmd["tool"], cmd["params"]) for cmd in params["commands"]]
+            reply = " → ".join(parts)
+        elif tool:
+            reply = await _execute_tool(tool, params)
         else:
-            try:
-                if tool == "load_structure":
-                    params["source"] = validate_source(params["source"])
-                elif tool == "color_selection":
-                    params["color"] = validate_color(params["color"])
-                elif tool == "render_image":
-                    params["output_path"] = validate_output_path(params["output_path"])
-            except ValueError as e:
-                reply = f"Error: {e}"
-                tool = ""
-
-            if tool:
-                result = await bridge.call_tool(tool, params)
-                reply = result["text"] if result["success"] else f"Error: {result['text']}"
+            reply = "Not sure what you mean — try 'load 2HHB' or ask me a protein biology question."
 
     await ctx.send(sender, ChatMessage(
         msg_id=uuid.uuid4(),
