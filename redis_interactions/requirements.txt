@@ -8,6 +8,12 @@ python-dotenv>=1.0
 PyMuPDF>=1.24
 pypdf>=4.0
 
-# Semantic chunking + embeddings (EmbeddingGemma, open weights)
-sentence-transformers>=3.0
+# Semantic chunking + embeddings (EmbeddingGemma, open weights).
+# EmbeddingGemma requires sentence-transformers>=5.0 and transformers>=4.56.
+sentence-transformers>=5.0
+transformers>=4.56
 numpy>=1.24
+
+# Authenticating to / downloading the gated EmbeddingGemma model from the
+# Hugging Face Hub (provides the `hf` CLI used for `hf auth login`).
+huggingface_hub>=0.34
