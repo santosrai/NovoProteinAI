@@ -1,8 +1,9 @@
 import asyncio
+import json
 import logging
 import os
-
 import re
+import time
 import uuid
 import datetime
 from uagents import Agent, Context, Protocol
@@ -157,35 +158,98 @@ async def handle_render(ctx: Context, sender: str, msg: RenderImageRequest):
     ))
 
 
-def _parse_chat_command(text: str) -> tuple[str, dict]:
-    """Parse natural language into (tool_name, params)."""
-    text = text.strip().lower()
+_ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 
-    # load <PDB>
-    m = re.search(r'\bload\b.*?([a-z0-9]{4})\b', text)
-    if m:
+_INTENT_SYSTEM = """You control PyMOL molecular visualization software.
+Parse the user's message and return ONLY a JSON object (no markdown, no explanation).
+
+Schema:
+{"tool": "<tool_name>", "params": {<params>}}
+
+Available tools:
+- "load_structure": load a protein. params: {"source": "<4-char PDB ID>", "object_name": ""}
+- "color_selection": color atoms. params: {"color": "<color_name>", "selection": "<pymol_selection>"}
+  selection examples: "all", "chain A", "chain B", "resn HEM"
+  color must be one of: red blue green yellow cyan magenta orange white black gray pink purple salmon slate teal violet wheat
+- "render_image": take a screenshot. params: {"output_path": "", "width": 800, "height": 600, "ray_trace": false}
+- "ping_pymol": check connection. params: {}
+- "unknown": cannot parse. params: {}
+
+Examples:
+"color the chain A red" → {"tool":"color_selection","params":{"color":"red","selection":"chain A"}}
+"make everything blue" → {"tool":"color_selection","params":{"color":"blue","selection":"all"}}
+"fetch 1ABC" → {"tool":"load_structure","params":{"source":"1ABC","object_name":""}}
+"take a screenshot" → {"tool":"render_image","params":{"output_path":"","width":800,"height":600,"ray_trace":false}}
+"is pymol running?" → {"tool":"ping_pymol","params":{}}"""
+
+
+async def _parse_with_llm(text: str) -> tuple[str, dict]:
+    """Use Claude to parse free-form English into a PyMOL tool call."""
+    if not _ANTHROPIC_API_KEY:
+        return "", {}
+    try:
+        import anthropic
+        client = anthropic.AsyncAnthropic(api_key=_ANTHROPIC_API_KEY)
+        msg = await client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=200,
+            system=_INTENT_SYSTEM,
+            messages=[{"role": "user", "content": text}],
+        )
+        raw = msg.content[0].text.strip()
+        data = json.loads(raw)
+        tool = data.get("tool", "unknown")
+        params = data.get("params", {})
+        if tool == "unknown":
+            return "", {}
+        # fill in render path if empty
+        if tool == "render_image" and not params.get("output_path"):
+            params["output_path"] = os.path.expanduser(
+                f"~/NovoProteinAI/renders/render_{int(time.time())}.png"
+            )
+        return tool, params
+    except Exception as e:
+        logger.warning(f"LLM parse failed: {e}")
+        return "", {}
+
+
+def _parse_with_regex(text: str) -> tuple[str, dict]:
+    """Regex fallback — used when no ANTHROPIC_API_KEY or LLM fails."""
+    t = text.strip().lower()
+
+    # load: find any 4-char alphanumeric that looks like a PDB ID
+    m = re.search(r'\b([a-z0-9]{4})\b', t)
+    if m and re.search(r'\b(load|fetch|open|import|get|show)\b', t):
         return "load_structure", {"source": m.group(1).upper(), "object_name": ""}
 
-    # color <color> [chain X]
-    m = re.search(r'\bcolor\b\s+(\w+)', text)
-    if m:
+    # color: extract known color anywhere in sentence, chain anywhere
+    from .validators import VALID_COLORS
+    found_color = next((c for c in VALID_COLORS if re.search(rf'\b{c}\b', t)), None)
+    if found_color and re.search(r'\b(color|colour|paint|highlight|make|set)\b', t):
         sel = "all"
-        cm = re.search(r'\bchain\s+(\w+)', text)
-        if cm:
+        cm = re.search(r'\bchain\s+(\w+)', t)
+        if cm and cm.group(1) not in VALID_COLORS:
             sel = f"chain {cm.group(1).upper()}"
-        return "color_selection", {"color": m.group(1), "selection": sel}
+        return "color_selection", {"color": found_color, "selection": sel}
 
-    # render / screenshot
-    if re.search(r'\brender\b|\bscreenshot\b|\bimage\b', text):
-        import os, time
-        path = os.path.expanduser(f"~/NovoProteinAI/renders/render_{int(time.time())}.png")
-        return "render_image", {"output_path": path, "width": 800, "height": 600, "ray_trace": False}
+    if re.search(r'\b(render|screenshot|image|picture|photo|save)\b', t):
+        return "render_image", {
+            "output_path": os.path.expanduser(f"~/NovoProteinAI/renders/render_{int(time.time())}.png"),
+            "width": 800, "height": 600, "ray_trace": False,
+        }
 
-    # ping
-    if re.search(r'\bping\b|\bstatus\b|\bconnect', text):
+    if re.search(r'\b(ping|status|connect|running|alive|check)\b', t):
         return "ping_pymol", {}
 
     return "", {}
+
+
+async def _parse_chat_command(text: str) -> tuple[str, dict]:
+    if _ANTHROPIC_API_KEY:
+        tool, params = await _parse_with_llm(text)
+        if tool:
+            return tool, params
+    return _parse_with_regex(text)
 
 
 chat_proto = Protocol(spec=chat_protocol_spec)
@@ -214,7 +278,7 @@ async def handle_chat(ctx: Context, sender: str, msg: ChatMessage):
     if not text:
         reply = "Send me a command like: load 1ABC, color red chain A, render, ping"
     else:
-        tool, params = _parse_chat_command(text)
+        tool, params = await _parse_chat_command(text)
         if not tool:
             reply = f"Unknown command: '{text}'. Try: load <PDB ID>, color <color> [chain X], render, ping"
         else:
