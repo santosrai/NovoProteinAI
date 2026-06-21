@@ -374,14 +374,23 @@ def build_agent():
         reply_text = None
 
         try:
-            from . import agent_graph, relay
+            from . import agent_graph
         except ImportError:
             import agent_graph  # type: ignore
-            import relay  # type: ignore
+
+        # relay is only needed for public (relay) transport. In local mode it
+        # may be absent (fastapi not installed) -> degrade gracefully.
+        try:
+            from . import relay
+        except ImportError:
+            try:
+                import relay  # type: ignore
+            except ImportError:
+                relay = None
 
         # 0. Pairing: link this chat session to a user's local PyMOL token.
         lowered = text.lower()
-        if lowered.startswith("pair "):
+        if relay is not None and lowered.startswith("pair "):
             token = text.split(None, 1)[1].strip()
             relay.set_pairing(sender, token)
             status = "connected" if relay.is_plugin_connected(token) else "waiting for plugin"
@@ -403,7 +412,8 @@ def build_agent():
             return
 
         # Make PyMOL tool calls route to this session's paired PyMOL.
-        token = relay.get_token(sender)
+        # In local mode (no relay) there is no token; tools talk to localhost.
+        token = relay.get_token(sender) if relay is not None else None
         agent_graph.current_token.set(token)
 
         # 1. Agentic brain (Claude + LangGraph + relay PyMOL tools), if enabled.

@@ -59,8 +59,24 @@ def _run_agent():
 
 
 def main():
+    transport = os.environ.get("PYMOL_TRANSPORT", "relay").lower()
     port = int(os.environ.get("PORT", "8000"))
 
+    # Local mode: the agent talks to PyMOL directly over localhost TCP (or a
+    # tunnel host set in PYMOL_HOST). No public relay is needed, so just run
+    # the agent in the main thread.
+    if transport in ("local", "direct", "mcp"):
+        if not os.environ.get("AGENT_SEED"):
+            raise SystemExit("AGENT_SEED is required to run the agent.")
+        logger.info(
+            "Local mode (PYMOL_TRANSPORT=%s): running agent only, no relay.",
+            transport,
+        )
+        _run_agent()  # blocks until the agent stops
+        return
+
+    # Relay (public) mode: relay on the main thread, agent in a background
+    # thread. Used when deployed publicly (e.g. Railway).
     if os.environ.get("AGENT_SEED"):
         agent_thread = threading.Thread(target=_run_agent, daemon=True)
         agent_thread.start()
