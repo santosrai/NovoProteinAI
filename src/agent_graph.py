@@ -91,6 +91,10 @@ SYSTEM_PROMPT = (
     "When a question is about a specific paper or protein the project has "
     "ingested, call search_papers to retrieve the relevant chunks: each result "
     "includes the chunk text and any pdb_candidates found in that same chunk. "
+    "If search_papers returns nothing relevant (the topic hasn't been ingested "
+    "yet), call ingest_pubmed with a focused topic to pull and ingest fresh "
+    "papers from PubMed, then call search_papers again to ground your answer in "
+    "the newly stored chunks. "
     "Finding the paper's PDB is a TWO-STEP search: first a topical query to "
     "identify the right paper (note its paper_id), then a SECOND search_papers "
     "call with that paper_id and a deposition-oriented query such as 'structure "
@@ -235,7 +239,39 @@ def search_papers(
     return results
 
 
-RESEARCH_TOOLS = [search_pdb, pdb_exists, search_pubmed, run_research, search_papers]
+@tool
+def ingest_pubmed(topic: str, max_papers: int = 5, abstract_only: bool = False) -> dict:
+    """Search PubMed for a topic, fetch & parse the papers, and ingest them.
+
+    Use this when the user asks about a topic the project has NOT ingested yet
+    (search_papers returns nothing relevant) and you need fresh literature. It
+    pulls the top `max_papers` PubMed hits, parses each directly from NCBI XML
+    (full text from PMC when the paper is open-access, abstract otherwise — no
+    PDF download), and stores the chunks in the SAME Redis vector index that
+    search_papers queries. After calling this, call search_papers to retrieve
+    and ground your answer in the newly ingested chunks.
+
+    Set abstract_only=True to skip full-text retrieval (faster). Returns a
+    summary: topic, pmids, total_chunks, and a per-paper list (title, source
+    'pmc'/'pubmed', chunk count).
+    """
+    # Lazy import keeps the redisvl/sentence-transformers/requests deps out of
+    # module import time, matching the search_papers tool.
+    from research_paper_interactions import search_and_ingest
+
+    return search_and_ingest(
+        topic, max_papers=max_papers, prefer_fulltext=not abstract_only
+    )
+
+
+RESEARCH_TOOLS = [
+    search_pdb,
+    pdb_exists,
+    search_pubmed,
+    run_research,
+    search_papers,
+    ingest_pubmed,
+]
 
 
 # --- PyMOL tools: relay transport (deployed / public) -----------------------

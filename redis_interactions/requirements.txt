@@ -17,3 +17,7 @@ numpy>=1.24
 # Authenticating to / downloading the gated EmbeddingGemma model from the
 # Hugging Face Hub (provides the `hf` CLI used for `hf auth login`).
 huggingface_hub>=0.34
+
+# PubMed/PMC ingestion (research_paper_interactions) fetches papers over HTTP
+# and parses the XML with the stdlib (xml.etree); only `requests` is extra.
+requests>=2.31
