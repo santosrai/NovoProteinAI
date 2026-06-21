@@ -160,31 +160,37 @@ async def handle_render(ctx: Context, sender: str, msg: RenderImageRequest):
 
 _ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 
-_INTENT_SYSTEM = """You control PyMOL molecular visualization software.
-Parse the user's message and return ONLY a JSON object (no markdown, no explanation).
+_INTENT_SYSTEM = """You are PyMOLS, an AI assistant that controls PyMOL molecular visualization software and answers questions about structural biology and proteins.
 
-Schema:
-{"tool": "<tool_name>", "params": {<params>}}
+Classify the user's message and return ONLY a JSON object (no markdown, no explanation).
+
+## If the message is a PyMOL command (load, color, render, ping/status):
+{"intent": "pymol_command", "tool": "<tool_name>", "params": {<params>}}
 
 Available tools:
-- "load_structure": load a protein. params: {"source": "<4-char PDB ID>", "object_name": ""}
-- "color_selection": color atoms. params: {"color": "<color_name>", "selection": "<pymol_selection>"}
-  selection examples: "all", "chain A", "chain B", "resn HEM"
-  color must be one of: red blue green yellow cyan magenta orange white black gray pink purple salmon slate teal violet wheat
-- "render_image": take a screenshot. params: {"output_path": "", "width": 800, "height": 600, "ray_trace": false}
-- "ping_pymol": check connection. params: {}
-- "unknown": cannot parse. params: {}
+- "load_structure": params: {"source": "<4-char PDB ID>", "object_name": ""}
+- "color_selection": params: {"color": "<color>", "selection": "<pymol_selection>"}
+  valid colors: red blue green yellow cyan magenta orange white black gray pink purple salmon slate teal violet wheat
+  selection examples: "all", "chain A", "chain B"
+- "render_image": params: {"output_path": "", "width": 800, "height": 600, "ray_trace": false}
+- "ping_pymol": params: {}
+
+## If the message is a question about proteins, biology, structures, or PyMOL usage:
+{"intent": "conversation", "reply": "<helpful answer in 2-3 sentences>"}
+
+## If the message is unrelated to molecular biology or PyMOL:
+{"intent": "out_of_scope", "reply": "I'm PyMOLS, a molecular visualization agent. I can load protein structures (e.g. 'load 2HHB'), color chains, render images, and answer questions about proteins and structural biology."}
 
 Examples:
-"color the chain A red" → {"tool":"color_selection","params":{"color":"red","selection":"chain A"}}
-"make everything blue" → {"tool":"color_selection","params":{"color":"blue","selection":"all"}}
-"fetch 1ABC" → {"tool":"load_structure","params":{"source":"1ABC","object_name":""}}
-"take a screenshot" → {"tool":"render_image","params":{"output_path":"","width":800,"height":600,"ray_trace":false}}
-"is pymol running?" → {"tool":"ping_pymol","params":{}}"""
+"color the chain A red" → {"intent":"pymol_command","tool":"color_selection","params":{"color":"red","selection":"chain A"}}
+"load 2HHB" → {"intent":"pymol_command","tool":"load_structure","params":{"source":"2HHB","object_name":""}}
+"what is hemoglobin?" → {"intent":"conversation","reply":"Hemoglobin is an iron-containing oxygen-transport protein found in red blood cells. It consists of four subunits (chains A, B, C, D) each carrying a heme group that binds oxygen. PDB entry 2HHB is the classic deoxy-hemoglobin structure."}
+"explain chain A" → {"intent":"conversation","reply":"In PyMOL, chain A refers to one polypeptide chain within a multi-chain protein complex. You can select it with 'chain A' and color or analyze it independently from other chains."}
+"what's the weather?" → {"intent":"out_of_scope","reply":"I'm PyMOLS, a molecular visualization agent. I can load protein structures (e.g. 'load 2HHB'), color chains, render images, and answer questions about proteins and structural biology."}"""
 
 
 async def _parse_with_llm(text: str) -> tuple[str, dict]:
-    """Use Claude to parse free-form English into a PyMOL tool call."""
+    """Classify intent and return (tool, params) or ("__reply__", {"text": ...})."""
     if not _ANTHROPIC_API_KEY:
         return "", {}
     try:
@@ -192,22 +198,29 @@ async def _parse_with_llm(text: str) -> tuple[str, dict]:
         client = anthropic.AsyncAnthropic(api_key=_ANTHROPIC_API_KEY)
         msg = await client.messages.create(
             model="claude-haiku-4-5-20251001",
-            max_tokens=200,
+            max_tokens=300,
             system=_INTENT_SYSTEM,
             messages=[{"role": "user", "content": text}],
         )
         raw = msg.content[0].text.strip()
         data = json.loads(raw)
-        tool = data.get("tool", "unknown")
-        params = data.get("params", {})
-        if tool == "unknown":
-            return "", {}
-        # fill in render path if empty
-        if tool == "render_image" and not params.get("output_path"):
-            params["output_path"] = os.path.expanduser(
-                f"~/NovoProteinAI/renders/render_{int(time.time())}.png"
-            )
-        return tool, params
+        intent = data.get("intent", "out_of_scope")
+
+        if intent == "pymol_command":
+            tool = data.get("tool", "")
+            params = data.get("params", {})
+            if not tool:
+                return "", {}
+            if tool == "render_image" and not params.get("output_path"):
+                params["output_path"] = os.path.expanduser(
+                    f"~/NovoProteinAI/renders/render_{int(time.time())}.png"
+                )
+            return tool, params
+
+        # conversation or out_of_scope → direct reply, no tool execution
+        reply = data.get("reply", "I can help with PyMOL commands and protein biology questions.")
+        return "__reply__", {"text": reply}
+
     except Exception as e:
         logger.warning(f"LLM parse failed: {e}")
         return "", {}
@@ -276,11 +289,13 @@ async def handle_chat(ctx: Context, sender: str, msg: ChatMessage):
     text = text.strip()
 
     if not text:
-        reply = "Send me a command like: load 1ABC, color red chain A, render, ping"
+        reply = "Hi! I'm PyMOLS. I can load protein structures, color chains, render images, and answer questions about molecular biology. Try: 'load 2HHB', 'color chain A red', or 'what is hemoglobin?'"
     else:
         tool, params = await _parse_chat_command(text)
-        if not tool:
-            reply = f"Unknown command: '{text}'. Try: load <PDB ID>, color <color> [chain X], render, ping"
+        if tool == "__reply__":
+            reply = params["text"]
+        elif not tool:
+            reply = "I can load protein structures, color chains, render images, and answer protein biology questions. Try: 'load 2HHB' or 'what is hemoglobin?'"
         else:
             try:
                 if tool == "load_structure":

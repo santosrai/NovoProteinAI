@@ -53,6 +53,19 @@ async def test_chain_b_green():
     assert "B" in params["selection"]
 
 
-async def test_unknown_graceful():
+async def test_out_of_scope():
     tool, params = await _parse_chat_command("what is the weather today?")
-    assert tool == ""
+    assert tool == "__reply__"
+    assert "PyMOLS" in params["text"] or "pymol" in params["text"].lower()
+
+
+async def test_conversation_biology():
+    tool, params = await _parse_chat_command("what is hemoglobin?")
+    assert tool == "__reply__"
+    assert len(params["text"]) > 20
+
+
+async def test_conversation_structure():
+    tool, params = await _parse_chat_command("explain what chain A means in a protein")
+    assert tool == "__reply__"
+    assert len(params["text"]) > 20
