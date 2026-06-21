@@ -40,9 +40,21 @@ ENV/
 htmlcov/
 .tox/
 
-# Config
+# Config / secrets
 .env
+.env.*
+!.env.example
 config.yaml
+config.yml
+*.local
+
+# Credentials / keys
+*.pem
+*.key
+secrets.json
+
+# Agent skills (reinstallable from skills-lock.json)
+.agents/
 
 # Logs
 *.log
