@@ -57,6 +57,23 @@ def color_selection(color: str, selection: str = "all") -> str:
 
 
 @mcp.tool()
+def rotate(axis: str = "y", angle: float = 90, selection: str = "") -> str:
+    """
+    Rotate the camera view or a specific object/selection in PyMOL.
+
+    Args:
+        axis: Rotation axis, one of 'x', 'y', or 'z' (default: 'y')
+        angle: Rotation angle in degrees (default: 90)
+        selection: Optional object/selection to rotate. If empty, rotates the
+            camera view instead of the molecule (default: '')
+
+    Returns:
+        Confirmation message
+    """
+    return tools.rotate(axis, angle, selection)
+
+
+@mcp.tool()
 def render_image(
     output_path: str,
     width: int = 800,

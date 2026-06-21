@@ -114,6 +114,53 @@ Check connection and get PyMOL version.
 ping_pymol()
 ```
 
+## Research Agent (Fetch.ai / Agentverse)
+
+`src/research_agent.py` is a Fetch.ai uAgent that turns a plain-English
+vaccine/therapeutic goal into a structured target result sourced from public
+biology databases (RCSB PDB + PubMed). Its JSON output matches the inputs of
+`render_image()` in `visualize.py`.
+
+### Output contract
+
+```json
+{
+  "target_name": "SARS-CoV-2 spike receptor-binding domain",
+  "pdb_id": "6VXX",
+  "chain": "A",
+  "epitope_residues": [417, 484, 501],
+  "binder_pdb_ids": ["7K8M"],
+  "explanation": "Plain-English summary a non-biologist can follow.",
+  "citations": [{"title": "...", "pmid": "...", "url": "https://pubmed.ncbi.nlm.nih.gov/..."}]
+}
+```
+
+### Run it
+
+```bash
+pip install -r requirements.txt
+export AGENT_SEED="some-fixed-phrase"     # required: stable agent address
+export ASI_ONE_API_KEY="..."              # optional: falls back to keyword parsing
+python src/research_agent.py
+```
+
+### Register on Agentverse
+
+1. Run the agent — it prints an Agentverse Inspector/mailbox link.
+2. Sign in at [agentverse.ai](https://agentverse.ai) and connect the mailbox so
+   the agent is reachable without a public IP.
+3. `publish_manifest=True` advertises chat capability, making it discoverable
+   from [ASI:One](https://asi1.ai).
+4. Test by messaging the agent: `build a vaccine for COVID`.
+
+### Environment variables
+
+- `AGENT_SEED` — fixed seed phrase for a stable agent address (required to run).
+- `ASI_ONE_API_KEY` — ASI:One key for goal parsing + explanation drafting (optional).
+
+> Note: `epitope_residues` is currently returned empty (IEDB lookup is a planned
+> follow-up).
+
 ## Configuration
 
 ### Environment Variables

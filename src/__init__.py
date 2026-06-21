@@ -1,0 +1,1 @@
+"""NovoProteinAI agent package."""
