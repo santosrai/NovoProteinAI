@@ -15,6 +15,8 @@ authors = [
 dependencies = [
     "fastmcp>=0.1.0",
     "pyyaml>=6.0",
+    "mcp>=1.0.0",
+    "uagents>=0.20.0",
 ]
 
 [project.optional-dependencies]
@@ -27,5 +29,5 @@ dev = [
 pymol-mcp = "pymol_mcp.server:main"
 
 [tool.setuptools.packages.find]
-include = ["pymol_mcp*"]
+include = ["pymol_mcp*", "pymol_uagent*"]
 exclude = ["tests*", "pymol_plugin*"]
