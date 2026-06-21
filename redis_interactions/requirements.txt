@@ -1,0 +1,11 @@
+# Redis vector-search ingestion pipeline
+redis>=5.0
+redisvl>=0.4.0
+python-dotenv>=1.0
+
+# PDF extraction
+pypdf>=4.0
+
+# Semantic chunking + embeddings (EmbeddingGemma, open weights)
+sentence-transformers>=3.0
+numpy>=1.24
