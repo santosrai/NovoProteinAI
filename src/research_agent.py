@@ -337,6 +337,47 @@ def handle_pymol_command(text: str):
     return None
 
 
+# --- image delivery over the chat protocol ----------------------------------
+def _build_image_resource(ctx, sender: str, image_bytes: bytes):
+    """Upload PNG bytes to Agentverse storage and return a ResourceContent.
+
+    Lets the agent deliver a PyMOL screenshot inline in the chat (not just a
+    link). Best-effort: returns None and logs if storage/credentials are
+    unavailable, so a failed upload never breaks the text reply.
+    """
+    api_token = os.environ.get("AGENTVERSE_KEY")
+    if not api_token:
+        ctx.logger.warning("AGENTVERSE_KEY not set; cannot attach screenshot.")
+        return None
+
+    from uuid import UUID, uuid4
+
+    from uagents_core.config import AgentverseConfig
+    from uagents_core.storage import ExternalStorage
+    from uagents_core.contrib.protocols.chat import Resource, ResourceContent
+
+    try:
+        storage_url = AgentverseConfig().storage_api
+        storage = ExternalStorage(api_token=api_token, storage_url=storage_url)
+        asset_id = storage.create_asset(
+            name=f"pymol-{uuid4().hex[:8]}.png",
+            content=image_bytes,
+            mime_type="image/png",
+        )
+        storage.set_permissions(asset_id=asset_id, agent_address=sender)
+        asset_uri = f"agent-storage://{storage_url}/{asset_id}"
+        return ResourceContent(
+            resource_id=UUID(asset_id),
+            resource=Resource(
+                uri=asset_uri,
+                metadata={"mime_type": "image/png", "role": "generated-image"},
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001 - never break the text reply
+        ctx.logger.warning(f"Could not attach PyMOL screenshot: {exc}")
+        return None
+
+
 # --- agent + chat protocol --------------------------------------------------
 def build_agent():
     """Construct the uAgent with the chat protocol attached.
@@ -432,6 +473,7 @@ def build_agent():
         # Safety net: close an active interactive cloud GUI on a plain "done"
         # message, even if the LLM doesn't call close_interactive_gui itself.
         if lowered in _GUI_DONE_PHRASES:
+            agent_graph.reset_history(sender)
             job_id = agent_graph.get_active_job(token)
             if job_id:
                 try:
@@ -453,11 +495,29 @@ def build_agent():
                 )
                 return
 
+        # Interim "loading" reply: fetching a structure + rendering can take
+        # ~10-20s, so let the user know work is in progress. The final result
+        # (or an error) is sent as a follow-up message below.
+        await ctx.send(
+            sender,
+            ChatMessage(
+                timestamp=datetime.now(timezone.utc),
+                msg_id=uuid4(),
+                content=[TextContent(
+                    type="text",
+                    text=(
+                        "⏳ Working on it — fetching the structure and preparing "
+                        "PyMOL. This can take up to ~20s…"
+                    ),
+                )],
+            ),
+        )
+
         # 1. Agentic brain (Claude + LangGraph + relay PyMOL tools), if enabled.
         try:
             if agent_graph.is_agentic_enabled():
                 ctx.logger.info(f"Agentic goal (token={token}): {text}")
-                reply_text = await agent_graph.run_agent(text)
+                reply_text = await agent_graph.run_agent(text, session_id=sender)
         except Exception as exc:  # fall back to the deterministic path
             ctx.logger.warning(f"Agentic path failed, falling back: {exc}")
             reply_text = None
@@ -477,12 +537,31 @@ def build_agent():
                 ctx.logger.info(viz["message"])
                 reply_text = json.dumps(result, indent=2)
 
+        # If nothing produced a usable reply, surface a clear error rather than
+        # sending an empty/blank message.
+        if not (reply_text and reply_text.strip()):
+            reply_text = (
+                "⚠️ Sorry, I couldn't complete that request. Make sure PyMOL is "
+                "open with the bridge server started (Plugin → PyMOL MCP Bridge "
+                "→ Start Server), then try again."
+            )
+
+        content = [TextContent(type="text", text=reply_text)]
+
+        # If the agent rendered a PyMOL view this turn, deliver it inline as an
+        # image attachment so the user can see the structure directly.
+        image_bytes = agent_graph.pop_last_image(token)
+        if image_bytes:
+            resource = _build_image_resource(ctx, sender, image_bytes)
+            if resource is not None:
+                content.append(resource)
+
         await ctx.send(
             sender,
             ChatMessage(
                 timestamp=datetime.now(timezone.utc),
                 msg_id=uuid4(),
-                content=[TextContent(type="text", text=reply_text)],
+                content=content,
             ),
         )
 

@@ -240,16 +240,38 @@ class PyMOLCommandHandler:
                     cmd.ray(width, height)
                 
                 cmd.png(output_path)
-                
-                return {
-                    "result": {
-                        "message": f"Rendered image to {output_path}",
-                        "path": output_path,
-                        "width": width,
-                        "height": height,
-                        "ray_traced": ray_trace
-                    }
+
+                # cmd.png() can be asynchronous in the interactive GUI, so wait
+                # for the file to land, then return it inline as base64 so the
+                # agent can show the screenshot in chat (not just on disk).
+                import base64 as _b64
+                import os as _os
+                import time as _time
+
+                image_b64 = None
+                try:
+                    deadline = _time.time() + 10.0
+                    while _time.time() < deadline:
+                        if _os.path.exists(output_path) and _os.path.getsize(output_path) > 0:
+                            break
+                        _time.sleep(0.1)
+                    with open(output_path, "rb") as _fh:
+                        image_b64 = _b64.b64encode(_fh.read()).decode("ascii")
+                except Exception as _exc:
+                    logger.warning(f"Could not read rendered image: {_exc}")
+
+                result_payload = {
+                    "message": f"Rendered image to {output_path}",
+                    "path": output_path,
+                    "width": width,
+                    "height": height,
+                    "ray_traced": ray_trace
                 }
+                if image_b64:
+                    result_payload["image_base64"] = image_b64
+                    result_payload["mime_type"] = "image/png"
+
+                return {"result": result_payload}
             
             else:
                 return {

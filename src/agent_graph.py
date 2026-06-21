@@ -45,7 +45,7 @@ if REPO_ROOT not in sys.path:
 
 DEFAULT_MODEL = "claude-3-5-sonnet-latest"
 
-SYSTEM_PROMPT = (
+BASE_PROMPT = (
     "You are NovoProteinAI, an agentic research assistant for vaccine and "
     "therapeutic design. Given a plain-English goal you decide which tools to "
     "call: use the research tools to find and validate a protein target (PDB "
@@ -54,12 +54,29 @@ SYSTEM_PROMPT = (
     "Prefer search_pdb + pdb_exists to find a real, validated structure; you "
     "may call run_research for a one-shot structured summary. Always confirm a "
     "PDB id exists before loading it in PyMOL. Be concise in your final answer "
-    "and report the target, why it was chosen, and any image you rendered. "
-    "If the user asks to explore, interact with, rotate, or open a structure in "
-    "their browser, use launch_interactive_gui to start a live cloud PyMOL "
-    "session and share the returned link. When the user says they are done with "
-    "the interactive view, call close_interactive_gui to shut it down."
+    "and report the target, why it was chosen, and any image you rendered."
 )
+
+# PyMOL guidance appended to BASE_PROMPT depending on the PYMOL_CLOUD toggle.
+CLOUD_PYMOL_PROMPT = (
+    " PyMOL runs as a live cloud session. When the user wants to see, explore, "
+    "rotate, or open a structure, call launch_interactive_gui to start it and "
+    "share the returned browser link; you can then load/color/select/render in "
+    "that same live session with the pymol_* tools. When the user is done, call "
+    "close_interactive_gui to shut it down. If the user wants a screenshot or an "
+    "easier way to see the structure, call pymol_render_image: the rendered "
+    "image is delivered to them inline in the chat alongside the viewer link."
+)
+LOCAL_PYMOL_PROMPT = (
+    " PyMOL runs locally on the user's machine. Use the pymol_* tools "
+    "(pymol_load_structure, pymol_color_selection, pymol_render_image, etc.) to "
+    "operate it and render images for the user. When the user asks to see a "
+    "structure or a screenshot, call pymol_render_image: the rendered image is "
+    "shown to them inline in the chat."
+)
+
+# Back-compat alias (older imports referenced SYSTEM_PROMPT).
+SYSTEM_PROMPT = BASE_PROMPT
 
 
 # --- research tools ---------------------------------------------------------
@@ -125,6 +142,38 @@ def get_active_job(token: "str | None") -> "str | None":
 def clear_active_job(token: "str | None") -> None:
     """Forget the tracked job for a session token."""
     _active_jobs.pop(token or "_local", None)
+
+
+# --- rendered image capture -------------------------------------------------
+# Maps a session key to the most recent rendered PNG bytes produced during a
+# turn. The chat handler pops this after run_agent() to deliver the screenshot
+# inline as a chat image attachment.
+_last_images: "dict[str, bytes]" = {}
+
+
+def _store_last_image(data: "bytes | None") -> None:
+    """Record rendered image bytes for the current session (best-effort)."""
+    if data:
+        _last_images[_session_key()] = data
+
+
+def pop_last_image(token: "str | None") -> "bytes | None":
+    """Return and clear the last rendered image bytes for a session token."""
+    return _last_images.pop(token or "_local", None)
+
+
+# --- conversation memory ----------------------------------------------------
+# Per-session chat history so the agent remembers context across turns. To keep
+# token usage low we store only the compact user/assistant text (NOT the verbose
+# tool-call traces) and keep just the most recent messages (MAX_HISTORY_MESSAGES,
+# default 12 = ~6 exchanges). Set MAX_HISTORY_MESSAGES=0 to disable memory.
+_MAX_HISTORY_MESSAGES = int(os.environ.get("MAX_HISTORY_MESSAGES", "12"))
+_histories: "dict[str, list[dict]]" = {}
+
+
+def reset_history(session_id: "str | None") -> None:
+    """Forget the stored conversation history for a session."""
+    _histories.pop(session_id or "_local", None)
 
 
 def _run_plugin(method: str, params: dict) -> dict:
@@ -221,7 +270,11 @@ def _relay_pymol_tools():
         height: int = 900,
         ray_trace: bool = False,
     ) -> str:
-        """Render the current PyMOL view to a PNG (saved on the user's machine)."""
+        """Render the current PyMOL view to a PNG and show it to the user.
+
+        The rendered image is delivered inline as a chat attachment, so the
+        user sees the screenshot directly (in addition to it being saved).
+        """
         resp = _run_plugin(
             "render_image",
             {
@@ -231,6 +284,16 @@ def _relay_pymol_tools():
                 "ray_trace": ray_trace,
             },
         )
+        if isinstance(resp, dict):
+            result = resp.get("result", {})
+            b64 = result.get("image_base64") if isinstance(result, dict) else None
+            if b64:
+                import base64
+
+                try:
+                    _store_last_image(base64.b64decode(b64))
+                except Exception:  # noqa: BLE001 - never break the tool call
+                    pass
         return f"✓ {_plugin_result_text(resp, 'Image rendered')}"
 
     return [
@@ -275,10 +338,25 @@ def _direct_pymol_tools():
 
     @tool
     def pymol_render_image(
-        output_path: str, width: int = 1200, height: int = 900, ray_trace: bool = False
+        output_path: str = "target.png",
+        width: int = 1200,
+        height: int = 900,
+        ray_trace: bool = False,
     ) -> str:
-        """Render the current PyMOL view to a PNG at output_path."""
-        return pt.render_image(output_path, width, height, ray_trace)
+        """Render the current PyMOL view to a PNG and show it to the user.
+
+        The rendered image is delivered inline as a chat attachment.
+        """
+        msg = pt.render_image(output_path, width, height, ray_trace)
+        try:
+            import os as _os
+
+            if _os.path.exists(output_path):
+                with open(output_path, "rb") as fh:
+                    _store_last_image(fh.read())
+        except Exception:  # noqa: BLE001 - never break the tool call
+            pass
+        return msg
 
     return [
         pymol_ping,
@@ -411,6 +489,18 @@ def is_agentic_enabled() -> bool:
     return bool(os.environ.get("ANTHROPIC_API_KEY"))
 
 
+def is_cloud_pymol() -> bool:
+    """True if the agent should use the RunPod cloud PyMOL (env PYMOL_CLOUD).
+
+    When enabled, the interactive cloud-GUI tools are offered and the prompt
+    steers visualization to a live cloud session. When disabled (default), the
+    agent drives the user's local PyMOL instead.
+    """
+    return os.environ.get("PYMOL_CLOUD", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
 async def get_graph():
     """Build and cache the LangGraph ReAct agent."""
     global _graph, _tool_source
@@ -422,13 +512,19 @@ async def get_graph():
 
     pymol_tools, source = await _load_pymol_tools()
     _tool_source = source
-    tools = RESEARCH_TOOLS + pymol_tools + _interactive_gui_tools()
+
+    # PYMOL_CLOUD selects the PyMOL backend: cloud (RunPod live GUI) vs local.
+    cloud = is_cloud_pymol()
+    tools = RESEARCH_TOOLS + pymol_tools
+    if cloud:
+        tools += _interactive_gui_tools()
+    prompt = BASE_PROMPT + (CLOUD_PYMOL_PROMPT if cloud else LOCAL_PYMOL_PROMPT)
 
     model = ChatAnthropic(
         model=os.environ.get("ANTHROPIC_MODEL", DEFAULT_MODEL),
         temperature=0,
     )
-    _graph = create_react_agent(model, tools, prompt=SYSTEM_PROMPT)
+    _graph = create_react_agent(model, tools, prompt=prompt)
     return _graph
 
 
@@ -448,10 +544,29 @@ def _extract_text(message) -> str:
     return str(content)
 
 
-async def run_agent(message: str) -> str:
-    """Run the agentic loop on a user message and return Claude's final reply."""
+async def run_agent(message: str, session_id: "str | None" = None) -> str:
+    """Run the agentic loop on a user message and return Claude's final reply.
+
+    Conversation memory: prior turns for `session_id` are prepended so the agent
+    has context. Only compact user/assistant text is retained (capped at
+    MAX_HISTORY_MESSAGES), keeping token usage low.
+    """
+    key = session_id or _session_key()
+    # Clear any stale screenshot so we only deliver one rendered this turn.
+    _last_images.pop(_session_key(), None)
     graph = await get_graph()
-    result = await graph.ainvoke(
-        {"messages": [{"role": "user", "content": message}]}
-    )
-    return _extract_text(result["messages"][-1])
+
+    history = _histories.get(key, []) if _MAX_HISTORY_MESSAGES > 0 else []
+    messages = history + [{"role": "user", "content": message}]
+    result = await graph.ainvoke({"messages": messages})
+    reply = _extract_text(result["messages"][-1])
+
+    # Persist a compact transcript (user prompt + final assistant text only) and
+    # trim to the most recent messages so history can't grow unbounded.
+    if _MAX_HISTORY_MESSAGES > 0:
+        updated = history + [
+            {"role": "user", "content": message},
+            {"role": "assistant", "content": reply},
+        ]
+        _histories[key] = updated[-_MAX_HISTORY_MESSAGES:]
+    return reply
