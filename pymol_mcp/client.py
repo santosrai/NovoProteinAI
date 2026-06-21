@@ -3,6 +3,7 @@ import struct
 import json
 import time
 import logging
+import threading
 from typing import Optional, Dict, Any
 from .config import PyMOLConfig
 
@@ -62,6 +63,7 @@ class PyMOLClient:
         self.socket: Optional[socket.socket] = None
         self.connected = False
         self.request_id = 0
+        self._lock = threading.Lock()
     
     def connect(self) -> bool:
         """Connect to PyMOL plugin with retry logic."""
@@ -101,6 +103,10 @@ class PyMOLClient:
     
     def call(self, method: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Call a JSON-RPC method on PyMOL plugin."""
+        with self._lock:
+            return self._call_locked(method, params)
+
+    def _call_locked(self, method: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         if not self.connected:
             if not self.connect():
                 return {
