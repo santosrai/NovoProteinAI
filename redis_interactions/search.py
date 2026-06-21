@@ -6,6 +6,7 @@ Example:
 """
 
 import argparse
+import re
 import sys
 
 from redisvl.query import VectorQuery
@@ -19,6 +20,57 @@ except ImportError:  # run directly as a script
     from schema import get_index
 
 RETURN_FIELDS = ["content", "title", "paper_id", "section", "year", "source"]
+
+# A PDB ID is 4 chars: a leading digit 1-9 then three alphanumerics, e.g. 6M0J.
+_PDB_RE = re.compile(r"\b[1-9][A-Za-z0-9]{3}\b")
+# Context words that signal a nearby PDB accession code, used to cut down on
+# false positives (years like "2020" also match the bare ID pattern).
+_PDB_CONTEXT_RE = re.compile(
+    r"(?:PDB|Protein Data Bank|accession (?:code|number|id)s?|deposited)"
+    r"[^.\n]{0,80}?\b([1-9][A-Za-z0-9]{3})\b",
+    re.IGNORECASE,
+)
+
+
+def extract_pdb_ids(text: str, require_context: bool = True) -> list[str]:
+    """Return deduped, uppercased PDB IDs found in ``text``.
+
+    By default only IDs sitting next to a context word ("PDB", "accession",
+    etc.) are returned, which avoids matching 4-digit years. Set
+    ``require_context=False`` to also accept any standalone ID that contains at
+    least one letter (still excludes all-digit tokens like "2020").
+    """
+    found: list[str] = []
+    seen: set[str] = set()
+
+    def _add(code: str) -> None:
+        code = code.upper()
+        if code not in seen:
+            seen.add(code)
+            found.append(code)
+
+    for m in _PDB_CONTEXT_RE.finditer(text):
+        _add(m.group(1))
+
+    if not require_context:
+        for m in _PDB_RE.finditer(text):
+            code = m.group(0)
+            if any(c.isalpha() for c in code):
+                _add(code)
+
+    return found
+
+
+def extract_pdb_ids_from_results(results: list[dict], **kwargs) -> list[str]:
+    """Aggregate, dedupe and return PDB IDs across a list of search results."""
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for r in results:
+        for code in extract_pdb_ids(r.get("content", ""), **kwargs):
+            if code not in seen:
+                seen.add(code)
+                ordered.append(code)
+    return ordered
 
 
 def build_filter(source=None, paper_id=None, section=None, year_min=None):
@@ -75,6 +127,12 @@ def main() -> None:
         score = r.get("vector_distance", "n/a")
         print(f"\n[{i}] {r.get('title')} ({r.get('year')})  dist={score}")
         print(f"    {r.get('content', '')[:300]}...")
+
+    pdb_ids = extract_pdb_ids_from_results(results)
+    if pdb_ids:
+        print(f"\nPDB IDs found: {', '.join(pdb_ids)}")
+    else:
+        print("\nPDB IDs found: none")
 
 
 if __name__ == "__main__":
