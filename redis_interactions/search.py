@@ -11,8 +11,12 @@ import sys
 from redisvl.query import VectorQuery
 from redisvl.query.filter import Num, Tag
 
-from embeddings import embed_query
-from schema import get_index
+try:  # package mode
+    from .embeddings import embed_query
+    from .schema import get_index
+except ImportError:  # run directly as a script
+    from embeddings import embed_query
+    from schema import get_index
 
 RETURN_FIELDS = ["content", "title", "paper_id", "section", "year", "source"]
 

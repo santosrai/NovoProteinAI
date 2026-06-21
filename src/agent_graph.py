@@ -36,12 +36,6 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-# The redis_interactions package uses bare imports (e.g. `from schema import ...`),
-# so its own directory must be importable for `search_papers` to work.
-REDIS_DIR = os.path.join(REPO_ROOT, "redis_interactions")
-if os.path.isdir(REDIS_DIR) and REDIS_DIR not in sys.path:
-    sys.path.insert(0, REDIS_DIR)
-
 DEFAULT_MODEL = "claude-sonnet-4-6"
 
 BINDER_COMPARISON_WORKFLOW = (
@@ -97,10 +91,16 @@ SYSTEM_PROMPT = (
     "When a question is about a specific paper or protein the project has "
     "ingested, call search_papers to retrieve the relevant chunks: each result "
     "includes the chunk text and any pdb_candidates found in that same chunk. "
-    "Choose the PDB id whose surrounding context matches the protein in the "
-    "prompt, then ALWAYS confirm it with pdb_exists before loading it (the "
-    "candidates are extracted from the paper's wording and may be wrong). If no "
-    "candidate validates, fall back to search_pdb. "
+    "Finding the paper's PDB is a TWO-STEP search: first a topical query to "
+    "identify the right paper (note its paper_id), then a SECOND search_papers "
+    "call with that paper_id and a deposition-oriented query such as 'structure "
+    "coordinates deposited Protein Data Bank accession code' with a larger k "
+    "(~10), because accession codes live in the Methods/Data-availability "
+    "section and a topical query usually misses them. A paper may also cite "
+    "OTHER structures (e.g. a reference complex), so choose the pdb_candidate "
+    "that matches THIS paper's own deposited structure from context, then "
+    "ALWAYS confirm it with pdb_exists before loading it. If no candidate "
+    "validates, fall back to search_pdb. "
     "Always confirm a "
     "PDB id exists before loading it in PyMOL. Be concise in your final answer "
     "and report the target, why it was chosen, and any image you rendered. "
@@ -146,11 +146,21 @@ def run_research(goal: str) -> dict:
 # A PDB id is a digit (1-9) followed by three alphanumerics, e.g. "6VXX".
 _PDB_CODE = r"[1-9][A-Za-z0-9]{3}"
 # High-confidence: an id introduced by a cue word ("PDB 6VXX", "RCSB: 6vxx",
-# "Protein Data Bank entry 6VXX"). Anchoring to a cue avoids the flood of false
-# positives a bare 4-char regex would produce on ordinary tokens.
+# "Protein Data Bank entry 6VXX", "accession number 6M0J", "accession codes
+# 6M0J"). Anchoring to a cue avoids the flood of false positives a bare 4-char
+# regex would produce on ordinary tokens. "accession" is included as a cue in
+# its own right because data-availability statements often read "...available
+# with accession codes 6M0J" with the PDB/RCSB word several tokens earlier.
+# Up to three optional connector words may sit between the cue and the code.
+_PDB_CUE = r"(?:PDB|RCSB|Protein\s+Data\s+Bank|accessions?)"
+_PDB_CONNECTOR = (
+    r"(?:ID|IDs|code|codes|entry|entries|accession|accessions|"
+    r"number|numbers|no|under|of|in|are|is|available|with|the)"
+)
 _PDB_CUE_RE = re.compile(
-    r"(?:PDB(?:\s*(?:ID|code|codes|entry|entries|accession))?|RCSB|"
-    r"Protein\s+Data\s+Bank)\b[^A-Za-z0-9]{0,15}(" + _PDB_CODE + r")\b",
+    _PDB_CUE + r"\b"
+    r"(?:[^A-Za-z0-9\n]{0,5}" + _PDB_CONNECTOR + r"){0,3}"
+    r"[^A-Za-z0-9\n]{0,5}(" + _PDB_CODE + r")\b",
     re.IGNORECASE,
 )
 
@@ -183,11 +193,23 @@ def search_papers(
     is a dict with: title, paper_id, section, year, source, content (the chunk
     text), and pdb_candidates (PDB ids detected in that same chunk's text).
 
-    The pdb_candidates come from the paper's wording and are NOT verified —
-    pick the one that fits the protein/context and confirm it with pdb_exists
-    before loading it in PyMOL. Optionally filter by paper_id or year_min.
+    Finding a PDB id reliably is a TWO-STEP search: a topical query (e.g. "covid
+    vaccine proteins") surfaces the right paper but rarely the chunk that holds
+    the accession code, because codes live in the Methods / Data-availability
+    section. So once you know the paper, call this tool AGAIN with paper_id set
+    to that paper and a deposition-oriented query like "structure coordinates
+    deposited Protein Data Bank accession code", and raise k (e.g. 10) to pull
+    in those sections.
+
+    The pdb_candidates come from the paper's wording and are NOT verified, and a
+    paper often cites OTHER structures too (e.g. a reference complex) — pick the
+    code that matches THIS paper's own deposited structure from the surrounding
+    context, then confirm it with pdb_exists before loading it in PyMOL.
+    Optionally filter by paper_id or year_min.
     """
-    from search import search as _search  # lazy: avoids hard dep at import time
+    # Lazy import: keeps the redisvl/sentence-transformers deps out of module
+    # import time (the agent still loads if the Redis stack isn't installed).
+    from redis_interactions.search import search as _search
 
     filters = {}
     if paper_id:

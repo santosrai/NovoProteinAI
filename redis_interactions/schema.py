@@ -10,7 +10,10 @@ import os
 
 from redisvl.index import SearchIndex
 
-from redis_client import get_redis_url
+try:  # package mode
+    from .redis_client import get_redis_url
+except ImportError:  # run directly as a script
+    from redis_client import get_redis_url
 
 # Embedding dimensionality MUST match the model that produced the vectors.
 #   EmbeddingGemma (google/embeddinggemma-300m) -> 768 (or 512/256/128 via MRL)
