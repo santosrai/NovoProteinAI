@@ -217,8 +217,8 @@ def _parse_with_regex(text: str) -> tuple[str, dict]:
     """Regex fallback — used when no ANTHROPIC_API_KEY or LLM fails."""
     t = text.strip().lower()
 
-    # load: find any 4-char alphanumeric that looks like a PDB ID
-    m = re.search(r'\b([a-z0-9]{4})\b', t)
+    # load: PDB IDs always start with a digit (e.g. 2HHB, 1ABC)
+    m = re.search(r'\b([0-9][a-z0-9]{3})\b', t)
     if m and re.search(r'\b(load|fetch|open|import|get|show)\b', t):
         return "load_structure", {"source": m.group(1).upper(), "object_name": ""}
 
